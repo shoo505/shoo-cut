@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      # 1. Checkout actual repository
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -33,31 +33,38 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 3. Setup Android SDK v4 + install packages
+      # 3. Setup Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
-        with:
-          accept-android-sdk-licenses: true
-          packages: |
-            platform-tools
-            platforms;android-33
-            build-tools;33.0.2
 
-      # 4. Verify Android SDK
+      # 4. Install required SDK packages
+      - name: Install Android SDK Components
+        run: |
+          echo "Updating Android SDK package list..."
+          sdkmanager --update
+
+          echo "Installing Android SDK packages..."
+          sdkmanager --install \
+            "platforms;android-33" \
+            "build-tools;33.0.2"
+
+          echo "Android SDK installation completed."
+
+      # 5. Verify SDK
       - name: Verify Android SDK
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
           sdkmanager --list_installed
 
-      # 5. Verify project structure
-      - name: Verify Android project
+      # 6. Verify project structure
+      - name: Verify Android Project
         run: |
           echo "Checking repository..."
 
           if [ ! -f "./gradlew" ]; then
             echo "ERROR: Gradle wrapper not found."
-            echo "This repository does not have a root-level Gradle wrapper."
             exit 1
           fi
 
@@ -71,18 +78,18 @@ jobs:
 
           echo "Project structure verified."
 
-      # 6. Setup Gradle
+      # 7. Setup Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # 7. Build APK
+      # 8. Build APK
       - name: Build Debug APK
         run: |
           ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace
 
-      # 8. Verify APK output
+      # 9. Verify APK
       - name: Verify APK
         run: |
           echo "Searching for generated APK..."
@@ -100,7 +107,7 @@ jobs:
 
           echo "APK generated successfully."
 
-      # 9. Upload APK
+      # 10. Upload APK
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -110,7 +117,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 10. Build summary
+      # 11. Build summary
       - name: Build Summary
         if: always()
         run: |
