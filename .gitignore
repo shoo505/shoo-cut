@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test and local output
+.pytest_cache/
+.coverage
+htmlcov/
+test-output/
+/tmp-*/
+*.partial.mp4
+.shoo-cut-*.mp4
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/

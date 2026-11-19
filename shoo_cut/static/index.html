@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Shoo Auto Cut - automatic, evenly distributed cuts from long local video recordings, exported at 720p.">
+  <title>Shoo Auto Cut</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" role="img" focusable="false">
+          <circle cx="8" cy="10" r="4"></circle>
+          <circle cx="8" cy="22" r="4"></circle>
+          <path d="M11.5 12.5 27 4.5M11.5 19.5 27 27.5M13 16 27 16"></path>
+        </svg>
+      </div>
+      <div>
+        <h1>Shoo Auto Cut</h1>
+        <p>Keep an even slice of long recordings. Export clean 720p MP4s.</p>
+      </div>
+    </div>
+    <div class="engine-badge" id="engineBadge" title="Checking the video engine">
+      <span class="status-dot" id="engineDot"></span>
+      <span id="engineText">Checking FFmpeg…</span>
+    </div>
+  </header>
+
+  <main class="page">
+    <div class="alert hidden" id="alertBox" role="alert">
+      <div class="alert-copy">
+        <strong id="alertTitle">Something went wrong</strong>
+        <span id="alertMessage"></span>
+        <span class="alert-hint hidden" id="alertHint"></span>
+      </div>
+      <button class="icon-button" id="alertClose" type="button" aria-label="Dismiss message">×</button>
+    </div>
+
+    <div class="workspace">
+      <section class="card source-card" aria-labelledby="sourceHeading">
+        <div class="card-head">
+          <div class="step-number" aria-hidden="true">1</div>
+          <div>
+            <h2 id="sourceHeading">Source video</h2>
+            <p>Pick a file on this computer. Nothing is uploaded anywhere.</p>
+          </div>
+        </div>
+
+        <div class="path-input-row">
+          <label class="sr-only" for="inputPath">Video file path</label>
+          <input id="inputPath" name="inputPath" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="/home/you/recordings/long-recording.mp4">
+          <button class="button secondary" id="browseInput" type="button">Browse…</button>
+          <button class="button ghost" id="inspectButton" type="button">Inspect</button>
+        </div>
+        <p class="field-hint">Tip: enter an absolute path directly, or use Browse to navigate drives and folders.</p>
+
+        <div class="empty-state" id="sourceEmpty">
+          <div class="empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 48 48" focusable="false">
+              <rect x="6" y="10" width="36" height="28" rx="5"></rect>
+              <path d="m20 18 11 6-11 6Z"></path>
+            </svg>
+          </div>
+          <strong>No source selected</strong>
+          <span>Metadata from FFprobe appears here after you choose a video.</span>
+        </div>
+
+        <div class="source-details hidden" id="metadataPanel">
+          <div class="source-title">
+            <div>
+              <strong id="sourceFilename">video.mp4</strong>
+              <span class="truncate muted" id="sourcePath"></span>
+            </div>
+            <span class="pill" id="sourceContainer">MP4</span>
+          </div>
+          <div class="warning-line hidden" id="sourceWarning"></div>
+          <dl class="meta-grid">
+            <div><dt>Duration</dt><dd id="metaDuration">—</dd></div>
+            <div><dt>Resolution</dt><dd id="metaResolution">—</dd></div>
+            <div><dt>Frame rate</dt><dd id="metaFps">—</dd></div>
+            <div><dt>Video codec</dt><dd id="metaVideoCodec">—</dd></div>
+            <div><dt>Audio</dt><dd id="metaAudio">—</dd></div>
+            <div><dt>File size</dt><dd id="metaSize">—</dd></div>
+            <div><dt>Bitrate</dt><dd id="metaBitrate">—</dd></div>
+            <div><dt>Segments kept</dt><dd id="metaSegments">—</dd></div>
+          </dl>
+          <p class="privacy-note">FFprobe reads header metadata locally. Long recordings are never loaded into memory.</p>
+        </div>
+      </section>
+
+      <section class="card settings-card" aria-labelledby="settingsHeading">
+        <div class="card-head">
+          <div class="step-number" aria-hidden="true">2</div>
+          <div>
+            <h2 id="settingsHeading">Retention &amp; output</h2>
+            <p>Choose how much of the timeline to keep.</p>
+          </div>
+        </div>
+
+        <fieldset class="retention-fieldset">
+          <legend>Keep approximately</legend>
+          <div class="segmented-control" id="retentionControl" role="group" aria-label="Retention percentage">
+            <button type="button" data-retention="25">25%</button>
+            <button type="button" data-retention="50" class="active" aria-pressed="true">50%</button>
+            <button type="button" data-retention="75">75%</button>
+            <button type="button" data-retention="100">100%</button>
+            <button type="button" data-retention="custom" aria-pressed="false">Custom</button>
+          </div>
+          <div class="custom-retention hidden" id="customRetentionRow">
+            <label for="customPercent">Custom retention</label>
+            <div class="number-input">
+              <input id="customPercent" type="number" min="0.1" max="100" step="any" value="40" inputmode="decimal">
+              <span>%</span>
+            </div>
+          </div>
+        </fieldset>
+
+        <div class="estimate-row" aria-live="polite">
+          <div><span>Source</span><strong id="estimateSource">—</strong></div>
+          <div><span>Kept</span><strong id="estimateKept">—</strong></div>
+          <div><span>Segments</span><strong id="estimateSegments">—</strong></div>
+        </div>
+
+        <div class="timeline-wrap" id="timelineWrap">
+          <div class="timeline" id="timeline" aria-label="Selected segment preview">
+            <div class="timeline-empty" id="timelineEmpty">The selected timeline will appear here.</div>
+          </div>
+          <div class="timeline-labels"><span>Start</span><span>End</span></div>
+        </div>
+
+        <details class="plan-details" id="planDetails">
+          <summary>Segment plan <span class="muted" id="planStrategyLabel"></span></summary>
+          <ol class="segment-list" id="segmentList"></ol>
+          <p class="fine-print">Segments are chosen evenly across the original timeline, kept in chronological order, and never overlapped. This is deterministic selection, not AI highlight detection.</p>
+        </details>
+
+        <div class="output-field">
+          <label for="outputDir">Output folder</label>
+          <div class="path-input-row">
+            <input id="outputDir" name="outputDir" type="text" autocomplete="off" spellcheck="false"
+                   placeholder="/home/you/Videos/Shoo Auto Cut">
+            <button class="button secondary" id="browseOutput" type="button">Browse…</button>
+          </div>
+        </div>
+
+        <div class="start-row">
+          <button class="button primary start-button" id="startButton" type="button" disabled>
+            <span class="button-spinner hidden" id="startSpinner" aria-hidden="true"></span>
+            <span id="startButtonLabel">Start cutting</span>
+          </button>
+          <span class="field-hint">One FFmpeg pass. H.264 video, AAC audio, 1280×720.</span>
+        </div>
+      </section>
+    </div>
+
+    <section class="card job-panel hidden" id="jobPanel" aria-labelledby="jobHeading" aria-live="polite">
+      <div class="job-head">
+        <div class="job-title-group">
+          <span class="status-dot large" id="jobDot"></span>
+          <div>
+            <h2 id="jobHeading">Processing</h2>
+            <p class="job-message" id="jobMessage">Starting…</p>
+          </div>
+        </div>
+        <button class="button danger ghost" id="cancelButton" type="button">Cancel export</button>
+      </div>
+
+      <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressTrack">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div class="progress-meta">
+        <strong id="progressPercent">0%</strong>
+        <span id="jobElapsed">0s elapsed</span>
+        <span id="jobSpeed"></span>
+      </div>
+
+      <div class="completion-box hidden" id="completionBox">
+        <div class="completion-icon" aria-hidden="true">✓</div>
+        <div class="completion-copy">
+          <strong>Export complete</strong>
+          <span id="completionDetails">Your MP4 is ready.</span>
+          <code class="output-path" id="outputPath">—</code>
+        </div>
+        <div class="completion-actions">
+          <button class="button secondary" id="copyPathButton" type="button">Copy path</button>
+          <button class="button ghost" id="newJobButton" type="button">Start another</button>
+        </div>
+      </div>
+
+      <div class="job-error hidden" id="jobErrorBox">
+        <strong>Export failed</strong>
+        <pre id="jobErrorText"></pre>
+      </div>
+
+      <details class="log-details" id="logDetails">
+        <summary>Processing log</summary>
+        <pre class="log-output" id="jobLog">Waiting for log output…</pre>
+      </details>
+    </section>
+
+    <section class="card history-panel hidden" id="historyPanel" aria-labelledby="historyHeading">
+      <div class="card-head compact">
+        <div>
+          <h2 id="historyHeading">Recent exports</h2>
+          <p>Job history is kept for this server session.</p>
+        </div>
+        <button class="icon-button" id="refreshHistory" type="button" aria-label="Refresh recent exports" title="Refresh">↻</button>
+      </div>
+      <div class="history-list" id="historyList"></div>
+    </section>
+
+    <section class="info-strip">
+      <div>
+        <strong>Built for long recordings</strong>
+        <span>Only selected ranges are decoded and one final encode is produced. No frame-by-frame Python processing.</span>
+      </div>
+      <div>
+        <strong>Aspect-ratio safe</strong>
+        <span>Bicubic scaling fits the picture inside 1280×720 and pads rather than stretching.</span>
+      </div>
+      <div>
+        <strong>Honest cutting</strong>
+        <span>The default algorithm is even timeline distribution, not content-aware AI.</span>
+      </div>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <span>Shoo Auto Cut 1.0</span>
+    <span>Local-only web interface · processing by FFmpeg</span>
+  </footer>
+
+  <div class="modal hidden" id="pickerModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-picker="true"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pickerTitle">
+      <header class="modal-head">
+        <div>
+          <h2 id="pickerTitle">Choose a video</h2>
+          <p id="pickerSubtitle">Browse folders on this computer.</p>
+        </div>
+        <button class="icon-button" id="pickerClose" type="button" aria-label="Close picker">×</button>
+      </header>
+      <div class="picker-path-row">
+        <button class="button icon-text" id="pickerUp" type="button" aria-label="Go to parent folder">↑ Up</button>
+        <label class="sr-only" for="pickerPath">Folder path</label>
+        <input id="pickerPath" type="text" spellcheck="false" autocomplete="off">
+        <button class="button secondary" id="pickerGo" type="button">Go</button>
+      </div>
+      <div class="shortcuts" id="pickerShortcuts"></div>
+      <div class="picker-options" id="pickerOptions">
+        <label class="check-label"><input type="checkbox" id="showAllFiles"> Show all file types</label>
+        <span class="muted" id="pickerCount"></span>
+      </div>
+      <div class="picker-list" id="pickerList" role="listbox" aria-label="Folders and files"></div>
+      <div class="picker-error hidden" id="pickerError"></div>
+      <footer class="modal-foot">
+        <span class="truncate muted" id="pickerCurrent"></span>
+        <div class="modal-actions">
+          <button class="button ghost" id="pickerCancel" type="button">Cancel</button>
+          <button class="button primary hidden" id="pickerUseFolder" type="button">Use this folder</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
