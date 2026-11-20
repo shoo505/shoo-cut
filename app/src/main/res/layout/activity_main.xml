@@ -236,45 +236,47 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:orientation="vertical"
-            android:gap="12dp">
+            android:orientation="vertical">
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonSelectVideo"
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
+                android:layout_marginBottom="12dp"
                 android:text="@string/select_video"
                 android:textSize="15sp"
                 android:textAllCaps="false"
                 android:backgroundTint="@color/primary"
                 android:textColor="@android:color/white"
-                android:cornerRadius="10dp" />
+                app:cornerRadius="10dp" />
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonStart"
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
+                android:layout_marginBottom="12dp"
                 android:text="@string/start_processing"
                 android:textSize="15sp"
                 android:textAllCaps="false"
                 android:backgroundTint="@color/secondary"
                 android:textColor="@android:color/white"
-                android:cornerRadius="10dp"
+                app:cornerRadius="10dp"
                 android:enabled="false" />
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonCancel"
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
+                android:layout_marginBottom="12dp"
                 android:text="@string/cancel"
                 android:textSize="15sp"
                 android:textAllCaps="false"
                 android:backgroundTint="@color/surface_variant"
                 android:textColor="@color/text_primary"
-                android:cornerRadius="10dp"
+                app:cornerRadius="10dp"
                 android:visibility="gone" />
 
-            <Button
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonOpenOutput"
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
@@ -283,7 +285,7 @@
                 android:textAllCaps="false"
                 android:backgroundTint="@color/surface_variant"
                 android:textColor="@color/text_primary"
-                android:cornerRadius="10dp"
+                app:cornerRadius="10dp"
                 android:visibility="gone" />
         </LinearLayout>
 
