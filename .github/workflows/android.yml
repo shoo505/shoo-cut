@@ -32,11 +32,11 @@ jobs:
         run: |
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
           
-          # Accept all licenses non-interactively
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          # Accept licenses with timeout to avoid hanging
+          timeout 60 bash -c 'yes | sdkmanager --licenses' || true
           
           # Install required packages
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937434" "cmake;3.22.1" > /dev/null 2>&1
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937434" "cmake;3.22.1"
 
       # --- Make gradlew executable ---
       - name: Make gradlew executable
