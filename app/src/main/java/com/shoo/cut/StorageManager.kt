@@ -50,10 +50,27 @@ class StorageManager(private val context: Context) {
         }
     }
 
-    /** Streams [source] into a file inside the user-selected SAF folder [folderUri]. */
-    fun writeFileToFolder(folderUri: Uri, source: File, fileName: String): Uri {
-        val treeDocId = DocumentsContract.getTreeDocumentId(folderUri)
-        val existingId = findDocumentInFolder(folderUri, fileName, treeDocId)
+    /**
+     * Pre-creates four output documents in the selected SAF folder.
+     * Returns a map of segment index (0-3) to output document URI.
+     */
+    fun createOutputDocuments(folderUri: Uri, baseFileName: String): Map<Int, Uri> {
+        val outputUris = mutableMapOf<Int, Uri>()
+        for (segmentIndex in 0..3) {
+            val segmentNumber = segmentIndex + 1
+            val fileName = "${baseFileName}_Part$segmentNumber.mp4"
+            val outputUri = createOutputDocument(folderUri, fileName)
+            outputUris[segmentIndex] = outputUri
+        }
+        return outputUris
+    }
+
+    /**
+     * Creates a single output document in the SAF folder.
+     */
+    private fun createOutputDocument(folderUri: Uri, fileName: String): Uri {
+        // Check if document already exists
+        val existingId = findDocumentInFolder(folderUri, fileName)
         val outputUri = if (existingId != null) {
             DocumentsContract.buildDocumentUriUsingTree(folderUri, existingId)
         } else {
@@ -64,17 +81,23 @@ class StorageManager(private val context: Context) {
                 fileName
             )
             if (newDoc == null) {
-                throw StorageException("Cannot create output file in selected folder.")
+                throw StorageException("Cannot create output file '$fileName' in selected folder.")
             }
             newDoc
         }
+        return outputUri
+    }
+
+    /**
+     * Streams [source] into the pre-created SAF output document [outputUri].
+     */
+    fun writeToOutputDocument(outputUri: Uri, source: File): Uri {
+        val sourceSize = source.length()
+        var written = 0L
 
         val output: OutputStream = context.contentResolver.openOutputStream(outputUri, "w")
             ?: throw StorageException("Cannot open output file for writing.")
-        
-        val sourceSize = source.length()
-        var written = 0L
-        
+
         source.inputStream().use { input ->
             output.use { out ->
                 val buffer = ByteArray(BUFFER_SIZE)
@@ -87,19 +110,53 @@ class StorageManager(private val context: Context) {
                 out.flush()
             }
         }
-        
+
         // Verify written size matches source
         if (written != sourceSize) {
             throw StorageException("Output file size mismatch: expected $sourceSize bytes, wrote $written bytes")
         }
-        
+
+        // Verify the written document has content
+        val writtenSize = getDocumentSize(outputUri)
+        if (writtenSize <= 0) {
+            throw StorageException("Output file is empty after writing.")
+        }
+        if (writtenSize != sourceSize) {
+            throw StorageException("Output file size mismatch after verification: expected $sourceSize bytes, document reports $writtenSize bytes")
+        }
+
         return outputUri
     }
 
-    private fun findDocumentInFolder(folderUri: Uri, fileName: String, treeDocId: String): String? {
+    /**
+     * Gets the size of a document via ContentResolver.
+     */
+    private fun getDocumentSize(uri: Uri): Long {
+        val projection = arrayOf(DocumentsContract.Document.COLUMN_SIZE)
+        return context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                    cursor.getLong(sizeIndex)
+                } else {
+                    0L
+                }
+            } else {
+                0L
+            }
+        } ?: 0L
+    }
+
+    /**
+     * Finds an existing document in the folder by name.
+     * Returns the document ID if found, null otherwise.
+     */
+    private fun findDocumentInFolder(folderUri: Uri, fileName: String): String? {
+        // For tree URIs, we need to use the tree document ID to build the children URI
+        val treeDocId = DocumentsContract.getTreeDocumentId(folderUri)
         val projection = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME)
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(folderUri, treeDocId)
-        context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+        return context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
                 val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
@@ -110,8 +167,31 @@ class StorageManager(private val context: Context) {
                     cursor.moveToNext()
                 }
             }
+            null
         }
-        return null
+    }
+
+    /** Opens an input stream for a SAF document URI. */
+    fun openInputStream(uri: Uri): InputStream? =
+        context.contentResolver.openInputStream(uri)
+
+    /**
+     * Gets the size of a document via ContentResolver.
+     */
+    fun getDocumentSize(uri: Uri): Long {
+        val projection = arrayOf(DocumentsContract.Document.COLUMN_SIZE)
+        return context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                    cursor.getLong(sizeIndex)
+                } else {
+                    0L
+                }
+            } else {
+                0L
+            }
+        } ?: 0L
     }
 
     /** True when the cache partition can hold [requiredBytes] plus a safety margin. */

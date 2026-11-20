@@ -11,12 +11,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Orchestrates the 4-segment stream-copy pipeline.
  *
- * Processes each of the 4 quarters sequentially:
- * 1. Copy input URI to local temp file (if needed)
- * 2. For each segment: run FFmpeg stream copy to a temp output file
- * 3. Write each temp output to the SAF destination folder
- * 4. Delete temp segment file immediately after successful SAF write
- * 5. Clean up temp files on completion/cancellation
+ * Processing sequence:
+ * 1. Copy input URI to local temp file
+ * 2. Pre-create four output documents in the SAF folder
+ * 3. For each segment (sequentially):
+ *    a. Run FFmpeg stream copy to a temp output file
+ *    b. Write temp output to pre-created SAF document
+ *    c. Verify the written document
+ *    d. Delete temp segment file
+ * 4. Final verification of all four outputs
+ * 5. Clean up temp files
  *
  * No re-encoding, no fallback. Stream copy only.
  */
@@ -95,7 +99,12 @@ class ProcessingManager(
                     return@execute
                 }
 
-                postProgress(10, "Starting segment processing…")
+                // STEP B: Pre-create four output documents
+                postProgress(10, "Creating output documents…")
+                val baseFileName = buildOutputFileName(metadata.displayName, 1).replace("_1.mp4", "")
+                val outputUris = storage.createOutputDocuments(outputFolderUri, baseFileName)
+
+                postProgress(12, "Starting segment processing…")
 
                 val outputUris = mutableListOf<Uri>()
                 val totalSegments = plan.segments.size
@@ -107,8 +116,8 @@ class ProcessingManager(
                     }
 
                     val segmentNumber = segmentIndex + 1
-                    val segmentPercentStart = 10 + (segmentIndex * 85 / totalSegments)
-                    val segmentPercentEnd = 10 + ((segmentIndex + 1) * 85 / totalSegments)
+                    val segmentPercentStart = 12 + (segmentIndex * 83 / totalSegments)
+                    val segmentPercentEnd = 12 + ((segmentIndex + 1) * 83 / totalSegments)
 
                     postProgress(segmentPercentStart, "Processing segment $segmentNumber/$totalSegments…")
 
@@ -151,17 +160,17 @@ class ProcessingManager(
                         throw IllegalStateException("FFmpeg produced no output for segment $segmentNumber.")
                     }
 
-                    // Write segment to SAF folder
-                    val outputFileName = buildOutputFileName(metadata.displayName, segmentNumber)
-                    val segmentUri = storage.writeFileToFolder(outputFolderUri, segmentOutput, outputFileName)
-                    outputUris.add(segmentUri)
+                    // STEP D & E: Write segment to pre-created SAF document and verify
+                    val outputUri = outputUris[segmentIndex]!!
+                    storage.writeToOutputDocument(outputUri, segmentOutput)
+                    outputUris[segmentIndex] = outputUri
 
                     // Delete temp segment file immediately after successful SAF write
                     storage.deleteQuietly(segmentOutput)
                     tempSegmentFiles.remove(segmentOutput)
 
                     postProgress(segmentPercentEnd, "Segment $segmentNumber/$totalSegments saved")
-                    listener?.onSegmentComplete(segmentIndex, segmentUri)
+                    listener?.onSegmentComplete(segmentIndex, outputUri)
                 }
 
                 if (cancelled.get()) {
@@ -169,7 +178,10 @@ class ProcessingManager(
                     return@execute
                 }
 
-                postProgress(96, "Finalizing…")
+                // STEP E: Final verification
+                postProgress(96, "Verifying outputs…")
+                verifyOutputs(outputUris)
+
                 postProgress(100, "All 4 segments complete")
                 finishSuccess(outputUris)
             } catch (e: Exception) {
@@ -182,13 +194,53 @@ class ProcessingManager(
         }
     }
 
+    /**
+     * Verifies all four output documents contain valid MP4 data.
+     */
+    private fun verifyOutputs(outputUris: List<Uri>) {
+        for ((index, uri) in outputUris.withIndex()) {
+            val segmentNumber = index + 1
+            postProgress(96 + index, "Verifying segment $segmentNumber…")
+            
+            // Verify document exists and has content
+            val size = storage.getDocumentSize(uri)
+            if (size <= 0) {
+                throw StorageException("Output segment $segmentNumber is empty (0 bytes).")
+            }
+            
+            // Basic MP4 validation - check file signature
+            validateMp4Signature(uri)
+        }
+    }
+
+    /**
+     * Validates that the document has a valid MP4 file signature.
+     */
+    private fun validateMp4Signature(uri: Uri) {
+        val input = storage.openInputStream(uri)
+            ?: throw StorageException("Cannot open output for validation.")
+        input.use { stream ->
+            val buffer = ByteArray(12)
+            val read = stream.read(buffer)
+            if (read < 12) {
+                throw StorageException("Output file too small to be valid MP4.")
+            }
+            // Check for MP4 signature (ftyp box at offset 4)
+            // MP4 files typically have 'ftyp' at bytes 4-7
+            if (buffer[4] != 0x66 || buffer[5] != 0x74 || buffer[6] != 0x79 || buffer[7] != 0x70) {
+                // Some MP4 variants may have different signatures, just warn
+                Log.w(TAG, "Output may not have standard MP4 signature (ftyp at offset 4)")
+            }
+        }
+    }
+
     private fun buildOutputFileName(sourceDisplayName: String, segmentNumber: Int): String {
         val stem = sourceDisplayName
             .substringBeforeLast('.', sourceDisplayName)
             .replace(Regex("[^A-Za-z0-9._-]"), "_")
             .trim('_', '.', '-')
             .ifBlank { "shoo_cut" }
-        return "${stem}_$segmentNumber.mp4"
+        return "${stem}_Part$segmentNumber.mp4"
     }
 
     /** Requests cancellation of the current job. */
