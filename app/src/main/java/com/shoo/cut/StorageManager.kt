@@ -45,8 +45,13 @@ class StorageManager(private val context: Context) {
      */
     fun copyUriToFile(uri: Uri, destination: File, onProgress: ((Long) -> Unit)? = null) {
         Log.d(TAG, "copyUriToFile: $uri")
-        val input: InputStream = context.contentResolver.openInputStream(uri)
-            ?: throw StorageException("Cannot open the selected video.")
+        val input: InputStream = try {
+            context.contentResolver.openInputStream(uri)
+        } catch (e: SecurityException) {
+            throw StorageException("Permission to read the selected video was lost. Please pick it again.", e)
+        } catch (e: Exception) {
+            throw StorageException("Cannot open the selected video: ${e.message ?: "unknown error"}", e)
+        } ?: throw StorageException("Cannot open the selected video.")
         input.use { source ->
             FileOutputStream(destination).use { output ->
                 val buffer = ByteArray(BUFFER_SIZE)
@@ -120,6 +125,11 @@ class StorageManager(private val context: Context) {
                 )
             } catch (e: FileNotFoundException) {
                 throw StorageException("Cannot create '$fileName' in the selected folder: ${e.message}", e)
+            } catch (e: SecurityException) {
+                throw StorageException(
+                    "No permission to create files in the selected folder. Please select the folder again.",
+                    e
+                )
             } catch (e: IllegalArgumentException) {
                 throw StorageException("Cannot create '$fileName' in the selected folder: ${e.message}", e)
             } ?: throw StorageException("Cannot create output file '$fileName' in the selected folder.")
@@ -199,15 +209,26 @@ class StorageManager(private val context: Context) {
     }
 
     private fun openTruncatingOutputStream(uri: Uri): OutputStream {
-        val stream = try {
-            context.contentResolver.openOutputStream(uri, "wt")
-        } catch (e: IllegalArgumentException) {
-            Log.w(TAG, "Provider rejected 'wt' mode, retrying with 'w': ${e.message}")
-            context.contentResolver.openOutputStream(uri, "w")
-        } catch (e: UnsupportedOperationException) {
-            context.contentResolver.openOutputStream(uri, "w")
+        try {
+            val stream = try {
+                context.contentResolver.openOutputStream(uri, "wt")
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "Provider rejected 'wt' mode, retrying with 'w': ${e.message}")
+                context.contentResolver.openOutputStream(uri, "w")
+            } catch (e: UnsupportedOperationException) {
+                context.contentResolver.openOutputStream(uri, "w")
+            }
+            return stream ?: throw StorageException("Cannot open the output file for writing.")
+        } catch (e: StorageException) {
+            throw e
+        } catch (e: SecurityException) {
+            throw StorageException(
+                "No permission to write to the selected folder. Please select the folder again.",
+                e
+            )
+        } catch (e: Exception) {
+            throw StorageException("Cannot open the output file for writing: ${e.message ?: "unknown error"}", e)
         }
-        return stream ?: throw StorageException("Cannot open the output file for writing.")
     }
 
     /** Opens an input stream for a SAF document URI. */
