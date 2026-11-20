@@ -102,11 +102,9 @@ class ProcessingManager(
                 // STEP B: Pre-create four output documents
                 postProgress(10, "Creating output documents…")
                 val baseFileName = buildOutputFileName(metadata.displayName, 1).replace("_1.mp4", "")
-                val outputUris = storage.createOutputDocuments(outputFolderUri, baseFileName)
-
-                postProgress(12, "Starting segment processing…")
-
-                val outputUris = mutableListOf<Uri>()
+                val outputUriMap = storage.createOutputDocuments(outputFolderUri, baseFileName)
+                // Convert map to ordered list for sequential processing
+                val outputUris = (0..3).map { outputUriMap[it]!! }.toMutableList()
                 val totalSegments = plan.segments.size
 
                 for ((segmentIndex, segment) in plan.segments.withIndex()) {
@@ -161,7 +159,7 @@ class ProcessingManager(
                     }
 
                     // STEP D & E: Write segment to pre-created SAF document and verify
-                    val outputUri = outputUris[segmentIndex]!!
+                    val outputUri = outputUris[segmentIndex]
                     storage.writeToOutputDocument(outputUri, segmentOutput)
                     outputUris[segmentIndex] = outputUri
 
@@ -227,7 +225,8 @@ class ProcessingManager(
             }
             // Check for MP4 signature (ftyp box at offset 4)
             // MP4 files typically have 'ftyp' at bytes 4-7
-            if (buffer[4] != 0x66 || buffer[5] != 0x74 || buffer[6] != 0x79 || buffer[7] != 0x70) {
+            // Convert bytes to int for comparison
+            if (buffer[4].toInt() != 0x66 || buffer[5].toInt() != 0x74 || buffer[6].toInt() != 0x79 || buffer[7].toInt() != 0x70) {
                 // Some MP4 variants may have different signatures, just warn
                 Log.w(TAG, "Output may not have standard MP4 signature (ftyp at offset 4)")
             }
