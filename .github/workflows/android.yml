@@ -2,17 +2,15 @@ name: Shoo Auto Cut Android APK Build
 
 on:
 push:
-branches: [main]
+branches:
+- main
 pull_request:
-branches: [main]
+branches:
+- main
 workflow_dispatch:
 
 permissions:
 contents: read
-
-concurrency:
-group: android-build-${{ github.ref }}
-cancel-in-progress: true
 
 jobs:
 build-apk:
@@ -24,76 +22,36 @@ steps:
   - name: Checkout repository
     uses: actions/checkout@v4
 
-  - name: Setup JDK 17
+  - name: Setup JDK
     uses: actions/setup-java@v4
     with:
       distribution: temurin
       java-version: '17'
-      cache: gradle
 
   - name: Setup Android SDK
     uses: android-actions/setup-android@v4
 
-  - name: Install Android SDK Components
+  - name: Install Android SDK
     run: |
-      sdkmanager --install \
-        "platforms;android-34" \
-        "platforms;android-35" \
-        "build-tools;34.0.0" \
-        "build-tools;35.0.0"
+      sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
 
-  - name: Verify Android Project
+  - name: Verify Gradle Wrapper
     run: |
-      if [ ! -f "./gradlew" ]; then
-        echo "ERROR: Gradle wrapper not found."
-        exit 1
-      fi
-
-      if [ ! -f "./settings.gradle" ] && \
-         [ ! -f "./settings.gradle.kts" ]; then
-        echo "ERROR: Gradle settings file not found."
-        exit 1
-      fi
-
-      chmod +x ./gradlew
-      ./gradlew --version
+      test -f gradlew || { echo "Gradle wrapper missing"; exit 1; }
+      chmod +x gradlew
 
   - name: Setup Gradle
     uses: gradle/actions/setup-gradle@v4
 
   - name: Run Unit Tests
-    run: |
-      ./gradlew testDebugUnitTest --no-daemon --stacktrace
+    run: ./gradlew testDebugUnitTest --no-daemon
 
-  - name: Build Debug APK
-    run: |
-      ./gradlew assembleDebug --no-daemon --stacktrace
+  - name: Build APK
+    run: ./gradlew assembleDebug --no-daemon
 
-  - name: Verify APK
-    run: |
-      APK_COUNT=$(find . -type f \
-        -path "*/build/outputs/apk/debug/*.apk" | wc -l)
-
-      if [ "$APK_COUNT" -eq 0 ]; then
-        echo "ERROR: No APK was generated."
-        exit 1
-      fi
-
-      find . -type f \
-        -path "*/build/outputs/apk/debug/*.apk" \
-        -exec ls -lh {} \;
-
-  - name: Upload APK Artifact
+  - name: Upload APK
     uses: actions/upload-artifact@v4
     with:
       name: shoo-auto-cut-debug-apk
-      path: |
-        **/build/outputs/apk/debug/*.apk
+      path: "**/build/outputs/apk/debug/*.apk"
       if-no-files-found: error
-      retention-days: 30
-
-  - name: Build Summary
-    if: always()
-    run: |
-      echo "## Shoo Auto Cut Android Build" >> "$GITHUB_STEP_SUMMARY"
-      echo "Status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
