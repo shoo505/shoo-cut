@@ -129,25 +129,6 @@ class StorageManager(private val context: Context) {
     }
 
     /**
-     * Gets the size of a document via ContentResolver.
-     */
-    private fun getDocumentSize(uri: Uri): Long {
-        val projection = arrayOf(DocumentsContract.Document.COLUMN_SIZE)
-        return context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
-                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
-                    cursor.getLong(sizeIndex)
-                } else {
-                    0L
-                }
-            } else {
-                0L
-            }
-        } ?: 0L
-    }
-
-    /**
      * Finds an existing document in the folder by name.
      * Returns the document ID if found, null otherwise.
      */
