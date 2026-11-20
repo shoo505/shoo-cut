@@ -47,7 +47,6 @@ class ProcessingService : Service() {
         const val EXTRA_ETA_MILLIS = "eta_millis"
         const val EXTRA_MODE = "mode"
         const val EXTRA_ERROR = "error"
-        const val EXTRA_JOB_STATE = "job_state"
 
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "video_processing"
@@ -202,7 +201,7 @@ class ProcessingService : Service() {
         if (elapsed < 2000) return null // Need some progress data first
         val estimatedTotal = (elapsed * 100.0 / percent).toLong()
         val remaining = estimatedTotal - elapsed
-        return if (remaining > 0) remaining else 0
+        return if (remaining > 0L) remaining else 0L
     }
 
     private fun sendProgressBroadcast(percent: Int, status: String, etaMillis: Long?, mode: FfmpegCommandBuilder.Mode) {
@@ -307,36 +306,23 @@ class ProcessingService : Service() {
         }
 
         // Add ETA to notification
-        state.etaMillis?.let { eta ->
-            val etaText = formatEta(eta)
-            builder.setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText("${state.status}\n$etaText remaining")
-            )
+        val style = NotificationCompat.BigTextStyle()
+        if (state.etaMillis != null) {
+            val etaText = formatEta(state.etaMillis!!)
+            style.bigText("${state.status}\n$etaText remaining")
         } else if (state.isProcessing) {
-            builder.setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText("${state.status}\nEstimating…")
-            )
+            style.bigText("${state.status}\nEstimating…")
         } else if (state.isCompleted) {
-            builder.setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText("Video processing completed")
-            )
+            style.bigText("Video processing completed")
             builder.setContentText("Completed")
         } else if (state.isCancelled) {
-            builder.setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText("Processing cancelled")
-            )
+            style.bigText("Processing cancelled")
             builder.setContentText("Cancelled")
         } else if (state.errorMessage != null) {
-            builder.setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText("Error: ${state.errorMessage}")
-            )
+            style.bigText("Error: ${state.errorMessage}")
             builder.setContentText("Error: ${state.errorMessage}")
         }
+        builder.setStyle(style)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, builder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)

@@ -497,14 +497,17 @@ class MainActivity : AppCompatActivity() {
                     if (cursor.moveToFirst()) {
                         val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                         if (index >= 0 && !cursor.isNull(index)) {
-                            return cursor.getString(index)
+                            cursor.getString(index)
+                        } else {
+                            uri.lastPathSegment ?: uri.toString()
                         }
+                    } else {
+                        uri.lastPathSegment ?: uri.toString()
                     }
-                }
+                } ?: (uri.lastPathSegment ?: uri.toString())
         } catch (_: Exception) {
-            // Fall back to the path segment.
+            uri.lastPathSegment ?: uri.toString()
         }
-        return uri.lastPathSegment ?: uri.toString()
     }
 
     private fun formatEta(millis: Long): String {
