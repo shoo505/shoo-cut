@@ -57,6 +57,8 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.activity:activity-ktx:1.9.0")
+    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
+    implementation("androidx.cardview:cardview:1.0.0")
 
     // Verified on Maven Central (checksum-verified, contents inspected):
     // genuine arm64-v8a / armeabi-v7a / x86 / x86_64 FFmpeg 4.4 libraries built

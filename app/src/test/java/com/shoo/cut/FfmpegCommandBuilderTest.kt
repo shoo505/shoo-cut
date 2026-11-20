@@ -56,7 +56,8 @@ class FfmpegCommandBuilderTest {
         assertEquals(FfmpegCommandBuilder.Mode.STREAM_COPY, mode)
         assertEquals("copy", args[args.indexOf("-c:v") + 1])
         assertEquals("copy", args[args.indexOf("-c:a") + 1])
-        assertEquals(2, args.count { it == "-map" })
+        assertEquals(1, args.count { it == "-map" })
+        assertEquals("0", args[args.indexOf("-map") + 1])
     }
 
     @Test
@@ -93,21 +94,20 @@ class FfmpegCommandBuilderTest {
     }
 
     @Test
-    fun streamCopyBuildsOneInputPerSegment() {
+    fun streamCopyUsesSingleInput() {
         val (_, args) = args(hasAudio = false, width = 1280, height = 720)
-        assertEquals(4, args.count { it == "-ss" })
-        assertEquals(4, args.count { it == "-t" })
-        assertEquals(4, args.count { it == "-i" })
+        // Stream copy should use single input, not one per segment
+        assertEquals(1, args.count { it == "-i" })
+        assertEquals(0, args.count { it == "-ss" })
+        assertEquals(0, args.count { it == "-t" })
     }
 
     @Test
-    fun streamCopyUsesConcatFilter() {
-        val modeAndArgs = args(hasAudio = true, width = 1280, height = 720)
-        val filter = filterOf(modeAndArgs)
-        assertTrue(filter.contains("concat=n=4:v=1:a=0"))
-        assertTrue(filter.contains("concat=n=4:v=0:a=1"))
-        assertTrue(filter.contains("setpts=PTS-STARTPTS"))
-        assertTrue(filter.contains("asetpts=PTS-STARTPTS"))
+    fun streamCopyMapsAllStreams() {
+        val (_, args) = args(hasAudio = true, width = 1280, height = 720)
+        // Should map all streams from input 0
+        assertEquals(1, args.count { it == "-map" })
+        assertEquals("0", args[args.indexOf("-map") + 1])
     }
 
     @Test

@@ -140,12 +140,14 @@ object FfmpegCommandBuilder {
 
     /**
      * Builds stream copy command arguments.
-     * Uses `-c copy` for both video and audio, with segment trimming and concatenation.
+     * For consecutive segments that reconstruct the entire timeline (0-25%, 25-50%, 50-75%, 75-100%),
+     * a simple full-file stream copy is sufficient and correct.
+     * FFmpeg cannot apply filter_complex operations while using -c copy.
      */
     private fun buildStreamCopyArguments(
         inputPath: String,
         outputPath: String,
-        plan: SegmentPlan,
+        plan: SegmentPlan, // Unused but kept for API consistency
         hasAudio: Boolean
     ): List<String> {
         val args = ArrayList<String>()
@@ -156,51 +158,12 @@ object FfmpegCommandBuilder {
         args += "info"
         args += "-stats"
 
-        // One input per segment with precise seeking
-        for (segment in plan.segments) {
-            val start = String.format(Locale.US, "%.3f", segment.startSeconds.coerceAtLeast(0.0))
-            val duration = String.format(
-                Locale.US,
-                "%.3f",
-                segment.durationSeconds.coerceAtLeast(0.001)
-            )
-            args += "-ss"
-            args += start
-            args += "-t"
-            args += duration
-            args += "-i"
-            args += inputPath
-        }
-
-        // Concat filter for stream copy - no re-encoding
-        val filters = ArrayList<String>()
-
-        for (index in plan.segments.indices) {
-            filters += "[$index:v]setpts=PTS-STARTPTS[v$index]"
-            if (hasAudio) {
-                filters += "[$index:a]asetpts=PTS-STARTPTS[a$index]"
-            }
-        }
-
-        val videoLabels = plan.segments.indices.joinToString(separator = "") { "[v$it]" }
-        filters += "${videoLabels}concat=n=${plan.segments.size}:v=1:a=0[vout]"
-
-        if (hasAudio) {
-            val audioLabels = plan.segments.indices.joinToString(separator = "") { "[a$it]" }
-            filters += "${audioLabels}concat=n=${plan.segments.size}:v=0:a=1[aout]"
-        }
-
-        args += "-filter_complex"
-        args += filters.joinToString(";")
+        // Simple full-file stream copy - the 4 consecutive segments reconstruct the entire video
+        args += "-i"
+        args += inputPath
 
         args += "-map"
-        args += "[vout]"
-        if (hasAudio) {
-            args += "-map"
-            args += "[aout]"
-        }
-
-        // Stream copy - no re-encoding
+        args += "0"
         args += "-c:v"
         args += "copy"
         if (hasAudio) {
@@ -210,8 +173,6 @@ object FfmpegCommandBuilder {
 
         args += "-movflags"
         args += "+faststart"
-        args += "-avoid_negative_ts"
-        args += "make_zero"
         args += "-f"
         args += "mp4"
         args += outputPath

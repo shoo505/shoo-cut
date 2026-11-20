@@ -1,29 +1,29 @@
 <resources>
     <string name="app_name">Shoo Auto Cut</string>
-    <string name="title">Shoo Auto Cut</string>
-    <string name="subtitle">Keep about 50% of your video, distributed across the whole timeline, then upscale to 720p.</string>
+    <string name="title">Shoo Cut</string>
+    <string name="subtitle">Automatic 4-part video cutting with 720p output</string>
 
     <string name="select_video">Select Video</string>
     <string name="no_video_selected">No video selected</string>
     <string name="no_video_details">Pick a video to see its details.</string>
     <string name="reading_video">Reading video information…</string>
-    <string name="unknown_size">unknown size</string>
+    <string name="unknown_size">Unknown size</string>
 
     <string name="video_details">%1$s • %2$s • %3$s</string>
-    <string name="retention_label">Automatic retention</string>
+    <string name="retention_label">Processing</string>
     <string name="retained_placeholder">Estimated output: —</string>
-    <string name="retained_estimate">Estimated output: %1$s (~%2$s of the original kept)</string>
+    <string name="retained_estimate">Estimated output: %1$s</string>
     <plurals name="segment_count">
-        <item quantity="one">%1$d segment distributed across the timeline</item>
-        <item quantity="other">%1$d segments distributed across the timeline</item>
+        <item quantity="one">%1$d part</item>
+        <item quantity="other">%1$d parts</item>
     </plurals>
-    <string name="output_specs">Output: 1280×720 • Bicubic • H.264/AAC • MP4</string>
+    <string name="output_specs">1280×720 • %1$s</string>
 
     <string name="start_processing">Start Processing</string>
     <string name="cancel">Cancel</string>
     <string name="open_output">Open Output Video</string>
 
-    <string name="status_idle">Idle</string>
+    <string name="status_idle">Ready</string>
     <string name="status_starting">Starting…</string>
     <string name="status_completed">Completed</string>
     <string name="status_error">Error: %1$s</string>
@@ -40,4 +40,16 @@
     <string name="select_video_first">Select a video first.</string>
     <string name="error_metadata">Failed to read video metadata</string>
     <string name="no_video_player">No app is available to open this video.</string>
+
+    <!-- New strings for notification and ETA -->
+    <string name="notification_channel_name">Video Processing</string>
+    <string name="notification_channel_desc">Shows video processing progress</string>
+    <string name="eta_estimating">Estimating…</string>
+    <string name="eta_seconds">%1$ds</string>
+    <string name="eta_minutes">%1$d min</string>
+    <string name="eta_hours_minutes">%1$dh %2$d min</string>
+    <string name="eta_hours">%1$dh</string>
+    <string name="processing_mode_stream_copy">Stream Copy</string>
+    <string name="processing_mode_bicubic">Bicubic 720p</string>
+    <string name="four_part_segmentation">4-part segmentation</string>
 </resources>
