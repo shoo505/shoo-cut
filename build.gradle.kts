@@ -17,6 +17,8 @@ allprojects {
     }
 }
 
+import org.gradle.api.tasks.Delete
+
 tasks.register("clean", Delete) {
     delete(rootProject.buildDir)
 }
