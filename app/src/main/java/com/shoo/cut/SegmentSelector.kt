@@ -1,7 +1,5 @@
 package com.shoo.cut
 
-import kotlin.math.ceil
-import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
@@ -23,8 +21,8 @@ data class Segment(
 /**
  * The complete, deterministic plan for one automatic cut.
  *
- * The plan keeps [actualRetainedSeconds] out of [sourceDurationSeconds], spread
- * over one or more chronological, non-overlapping segments.
+ * The plan divides the source video into exactly 4 consecutive segments,
+ * each representing 25% of the original duration.
  */
 data class SegmentPlan(
     val sourceDurationSeconds: Double,
@@ -42,39 +40,33 @@ data class SegmentPlan(
 }
 
 /**
- * Deterministic, content-agnostic segment selection.
+ * Deterministic segment selection that divides the video into 4 equal quarters.
  *
- * This is a Kotlin port of the earlier even-distribution strategy: the video is
- * divided into [count] equal retained chunks with equal gaps before, between and
- * after them. No picture or audio analysis is performed - this is not "AI
- * highlight detection".
+ * The video is divided into exactly 4 consecutive segments:
+ * - Segment 1: 0–25%
+ * - Segment 2: 25–50%
+ * - Segment 3: 50–75%
+ * - Segment 4: 75–100%
  *
- * For [DEFAULT_RETENTION_PERCENT] the plan retains approximately half of the
- * source duration while covering the whole timeline, instead of keeping only the
- * first or last half.
+ * This retains 100% of the original video duration, split into 4 quarters
+ * for processing.
  */
 object SegmentSelector {
 
-    /** The application always keeps about half of the video. */
-    const val DEFAULT_RETENTION_PERCENT = 50.0
+    /** Number of segments to divide the video into. */
+    const val SEGMENT_COUNT = 4
 
-    /** Upper bound on retained chunks; keeps the FFmpeg filter graph small. */
-    const val MAX_SEGMENTS = 8
-
-    /** Aim for chunks around this length before hitting [MAX_SEGMENTS]. */
-    const val TARGET_SEGMENT_SECONDS = 120.0
-
-    /** Do not create chunks shorter than this unless the whole target is tiny. */
-    const val MIN_SEGMENT_SECONDS = 0.2
+    /** The application retains the entire video (100%), divided into quarters. */
+    const val DEFAULT_RETENTION_PERCENT = 100.0
 
     /** Anything shorter than this cannot be processed reliably. */
     const val MIN_SOURCE_SECONDS = 0.1
 
     /**
-     * Builds a retain plan for [sourceDurationSeconds].
+     * Builds a retain plan that divides the source video into 4 equal quarters.
      *
      * @throws IllegalArgumentException for non-finite, negative or too-short
-     * durations, or for a retention percent outside `(0, 100]`.
+     * durations.
      */
     fun select(
         sourceDurationSeconds: Double,
@@ -93,36 +85,19 @@ object SegmentSelector {
         val duration = sourceDurationSeconds
         val target = duration * retentionPercent / 100.0
 
-        // Keeping everything is a single full-range segment.
-        if (target >= duration - 1e-9) {
-            return SegmentPlan(
-                sourceDurationSeconds = duration,
-                retentionPercent = retentionPercent,
-                targetRetainedSeconds = target,
-                actualRetainedSeconds = duration,
-                segments = listOf(Segment(0, 0.0, duration))
-            )
-        }
+        // The video is divided into exactly 4 consecutive quarters
+        val segments = ArrayList<Segment>(SEGMENT_COUNT)
+        val quarterDuration = duration / SEGMENT_COUNT
 
-        var count = ceil(target / TARGET_SEGMENT_SECONDS).toInt().coerceIn(1, MAX_SEGMENTS)
-        if (target < MIN_SEGMENT_SECONDS) {
-            count = 1
-        } else {
-            count = min(count, max(1, floor(target / MIN_SEGMENT_SECONDS).toInt()))
-        }
-
-        val segmentDuration = target / count
-        val gap = (duration - target) / (count + 1)
-
-        val segments = ArrayList<Segment>(count)
-        for (index in 0 until count) {
-            var start = gap + index * (segmentDuration + gap)
-            var end = start + segmentDuration
-            if (index == count - 1) {
-                end = min(end, duration)
+        for (index in 0 until SEGMENT_COUNT) {
+            val start = index * quarterDuration
+            // For the last segment, ensure it reaches exactly the end of the video
+            // to handle any floating-point rounding
+            val end = if (index == SEGMENT_COUNT - 1) {
+                duration
+            } else {
+                (index + 1) * quarterDuration
             }
-            start = start.coerceIn(0.0, duration)
-            end = end.coerceIn(0.0, duration)
 
             if (end - start <= 0.0) {
                 throw IllegalArgumentException("Could not build a usable segment for this video.")
@@ -130,7 +105,7 @@ object SegmentSelector {
             segments.add(Segment(index, start, end))
         }
 
-        // Rounding must never introduce overlaps or reorder clips.
+        // Verify segments are continuous and non-overlapping
         for (index in 1 until segments.size) {
             require(segments[index].startSeconds >= segments[index - 1].endSeconds - 1e-9) {
                 "Internal selection error: generated overlapping segments."

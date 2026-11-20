@@ -8,26 +8,47 @@ import org.junit.Test
 class SegmentSelectorTest {
 
     @Test
-    fun defaultRetentionKeepsHalf() {
+    fun defaultRetentionKeepsFullVideo() {
         val plan = SegmentSelector.select(600.0)
-        assertEquals(50.0, plan.effectiveRetentionPercent, 0.01)
-        assertEquals(300.0, plan.actualRetainedSeconds, 1e-6)
-        assertTrue(plan.segments.isNotEmpty())
+        assertEquals(100.0, plan.effectiveRetentionPercent, 0.01)
+        assertEquals(600.0, plan.actualRetainedSeconds, 1e-6)
+        assertEquals(4, plan.segments.size)
     }
 
     @Test
-    fun segmentsSpanTheWholeTimeline() {
-        val duration = 3600.0
+    fun exactlyFourSegmentsCreated() {
+        val durations = listOf(1.0, 10.0, 60.0, 120.0, 600.0, 3600.0, 39600.0)
+        for (duration in durations) {
+            val plan = SegmentSelector.select(duration)
+            assertEquals("Duration $duration: should have exactly 4 segments", 4, plan.segments.size)
+        }
+    }
+
+    @Test
+    fun segmentsAreConsecutiveQuarters() {
+        val duration = 100.0
         val plan = SegmentSelector.select(duration)
 
-        assertTrue("first segment should start early", plan.segments.first().startSeconds < duration * 0.15)
-        assertTrue("last segment should end late", plan.segments.last().endSeconds > duration * 0.85)
-        assertTrue("must use multiple segments", plan.segments.size >= 2)
+        // Segment 1: 0-25%
+        assertEquals(0.0, plan.segments[0].startSeconds, 1e-9)
+        assertEquals(25.0, plan.segments[0].endSeconds, 1e-9)
+
+        // Segment 2: 25-50%
+        assertEquals(25.0, plan.segments[1].startSeconds, 1e-9)
+        assertEquals(50.0, plan.segments[1].endSeconds, 1e-9)
+
+        // Segment 3: 50-75%
+        assertEquals(50.0, plan.segments[2].startSeconds, 1e-9)
+        assertEquals(75.0, plan.segments[2].endSeconds, 1e-9)
+
+        // Segment 4: 75-100%
+        assertEquals(75.0, plan.segments[3].startSeconds, 1e-9)
+        assertEquals(100.0, plan.segments[3].endSeconds, 1e-9)
     }
 
     @Test
     fun segmentsAreChronologicalAndDoNotOverlap() {
-        val durations = listOf(1.0, 5.0, 60.0, 600.0, 3600.0, 39600.0)
+        val durations = listOf(1.0, 5.0, 60.0, 600.0, 3600.0, 39600.0, 123.456)
         for (duration in durations) {
             val plan = SegmentSelector.select(duration)
             var previousEnd = -1.0
@@ -47,41 +68,37 @@ class SegmentSelectorTest {
     }
 
     @Test
-    fun retainedDurationIsApproximatelyHalf() {
-        val durations = listOf(10.0, 120.0, 3599.0, 7200.0, 39600.0)
+    fun retainedDurationEqualsFullVideo() {
+        val durations = listOf(10.0, 120.0, 3599.0, 7200.0, 39600.0, 123.456)
         for (duration in durations) {
             val plan = SegmentSelector.select(duration)
-            assertEquals(duration * 0.5, plan.actualRetainedSeconds, duration * 0.01)
-            assertEquals(50.0, plan.effectiveRetentionPercent, 1.0)
+            assertEquals(duration, plan.actualRetainedSeconds, 1e-6)
+            assertEquals(100.0, plan.effectiveRetentionPercent, 0.01)
         }
     }
 
     @Test
-    fun segmentCountIsCappedAtMaximum() {
-        val plan = SegmentSelector.select(10.0 * 3600.0)
-        assertTrue(plan.segments.size <= SegmentSelector.MAX_SEGMENTS)
-    }
-
-    @Test
-    fun shortVideoStillKeepsHalf() {
+    fun shortVideoStillDividedIntoFour() {
         val plan = SegmentSelector.select(1.0)
-        assertEquals(0.5, plan.actualRetainedSeconds, 1e-6)
-        assertEquals(1, plan.segments.size)
-        assertTrue(plan.segments[0].endSeconds <= 1.0 + 1e-9)
+        assertEquals(4, plan.segments.size)
+        assertEquals(0.25, plan.segments[0].durationSeconds, 1e-6)
+        assertEquals(0.25, plan.segments[1].durationSeconds, 1e-6)
+        assertEquals(0.25, plan.segments[2].durationSeconds, 1e-6)
+        assertEquals(0.25, plan.segments[3].durationSeconds, 1e-6)
     }
 
     @Test
-    fun tinyVideoUsesSingleSegment() {
+    fun tinyVideoUsesFourSegments() {
         val plan = SegmentSelector.select(0.3)
-        assertEquals(0.15, plan.actualRetainedSeconds, 1e-6)
-        assertEquals(1, plan.segments.size)
+        assertEquals(4, plan.segments.size)
+        assertEquals(0.075, plan.segments[0].durationSeconds, 1e-6)
     }
 
     @Test
     fun minimumDurationIsAccepted() {
         val plan = SegmentSelector.select(SegmentSelector.MIN_SOURCE_SECONDS)
+        assertEquals(4, plan.segments.size)
         assertTrue(plan.actualRetainedSeconds > 0.0)
-        assertEquals(1, plan.segments.size)
     }
 
     @Test
@@ -112,11 +129,11 @@ class SegmentSelectorTest {
     }
 
     @Test
-    fun fullRetentionReturnsWholeVideo() {
+    fun fullRetentionReturnsWholeVideoInFourSegments() {
         val plan = SegmentSelector.select(120.0, 100.0)
         assertEquals(120.0, plan.actualRetainedSeconds, 1e-6)
-        assertEquals(1, plan.segments.size)
-        assertEquals(120.0, plan.segments[0].endSeconds, 1e-6)
+        assertEquals(4, plan.segments.size)
+        assertEquals(120.0, plan.segments[3].endSeconds, 1e-6)
     }
 
     @Test
@@ -124,5 +141,30 @@ class SegmentSelectorTest {
         val plan = SegmentSelector.select(4321.0)
         val sum = plan.segments.sumOf { it.durationSeconds }
         assertEquals(sum, plan.actualRetainedSeconds, 1e-6)
+    }
+
+    @Test
+    fun lastSegmentReachesExactEndOfVideo() {
+        // Test with a duration that doesn't divide evenly by 4
+        val duration = 100.1
+        val plan = SegmentSelector.select(duration)
+        assertEquals(duration, plan.segments[3].endSeconds, 1e-9)
+    }
+
+    @Test
+    fun segmentsCoverEntireTimelineWithoutGaps() {
+        val duration = 500.0
+        val plan = SegmentSelector.select(duration)
+
+        // First segment starts at 0
+        assertEquals(0.0, plan.segments.first().startSeconds, 1e-9)
+
+        // Last segment ends at exact duration
+        assertEquals(duration, plan.segments.last().endSeconds, 1e-9)
+
+        // Each segment is exactly 25%
+        for (segment in plan.segments) {
+            assertEquals(duration / 4.0, segment.durationSeconds, 1e-9)
+        }
     }
 }
