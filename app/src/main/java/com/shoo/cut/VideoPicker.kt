@@ -24,8 +24,4 @@ object VideoPicker {
             addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
-
-    /** Derives a friendly `*_cut50.mp4` name from the source display name. */
-    fun buildOutputFileName(sourceDisplayName: String): String =
-        deriveOutputFileName(sourceDisplayName)
 }

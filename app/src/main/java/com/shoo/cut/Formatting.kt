@@ -40,13 +40,3 @@ fun formatFileSize(bytes: Long): String {
 
 /** Formats a percentage with one decimal place. */
 fun formatPercent(value: Double): String = String.format(Locale.US, "%.1f%%", value)
-
-/** Derives a safe `*_cut50.mp4` output name from a source display name. */
-fun deriveOutputFileName(sourceDisplayName: String): String {
-    val stem = sourceDisplayName
-        .substringBeforeLast('.', sourceDisplayName)
-        .replace(Regex("[^A-Za-z0-9._-]"), "_")
-        .trim('_', '.', '-')
-        .ifBlank { "shoo_cut" }
-    return "${stem}_cut50.mp4"
-}

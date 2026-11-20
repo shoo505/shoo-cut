@@ -15,7 +15,6 @@ import android.os.IBinder
 import android.os.Looper
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -26,7 +25,7 @@ import java.util.concurrent.TimeUnit
  */
 class ProcessingService : Service() {
 
-    // Broadcast actions
+    // Broadcast actions - using LocalBroadcastManager for app-internal communication
     companion object {
         const val ACTION_START = "com.shoo.cut.action.START_PROCESSING"
         const val ACTION_CANCEL = "com.shoo.cut.action.CANCEL_PROCESSING"
@@ -82,7 +81,10 @@ class ProcessingService : Service() {
         when (intent.action) {
             ACTION_START -> handleStartProcessing(intent)
             ACTION_CANCEL -> handleCancel()
-            ACTION_GET_STATE -> sendStateBroadcast()
+            ACTION_GET_STATE -> {
+                // For state query, reply directly without starting foreground processing
+                sendStateBroadcast()
+            }
         }
 
         return START_NOT_STICKY
@@ -217,7 +219,7 @@ class ProcessingService : Service() {
             putExtra(EXTRA_STATUS, status)
             etaMillis?.let { putExtra(EXTRA_ETA_MILLIS, it) }
         }
-        sendBroadcast(intent)
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
     private fun sendSegmentCompleteBroadcast(segmentIndex: Int, outputUri: Uri) {
@@ -225,25 +227,26 @@ class ProcessingService : Service() {
             putExtra(EXTRA_SEGMENT_INDEX, segmentIndex)
             putExtra(EXTRA_OUTPUT_URIS, outputUri)
         }
-        sendBroadcast(intent)
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
     private fun sendCompletedBroadcast(outputUris: List<Uri>) {
         val intent = Intent(BROADCAST_COMPLETED).apply {
             putParcelableArrayListExtra(EXTRA_OUTPUT_URIS, ArrayList(outputUris))
         }
-        sendBroadcast(intent)
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
     private fun sendErrorBroadcast(message: String) {
         val intent = Intent(BROADCAST_ERROR).apply {
             putExtra(EXTRA_ERROR, message)
         }
-        sendBroadcast(intent)
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
     private fun sendCancelledBroadcast() {
-        sendBroadcast(Intent(BROADCAST_CANCELLED))
+        val intent = Intent(BROADCAST_CANCELLED)
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
     private fun sendStateBroadcast() {
@@ -251,7 +254,7 @@ class ProcessingService : Service() {
             val intent = Intent(BROADCAST_STATE).apply {
                 putExtra(EXTRA_JOB_STATE, state)
             }
-            sendBroadcast(intent)
+            androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
         }
     }
 

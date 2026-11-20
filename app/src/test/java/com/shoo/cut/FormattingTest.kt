@@ -33,11 +33,4 @@ class FormattingTest {
         assertEquals("50.0%", formatPercent(50.0))
         assertEquals("33.3%", formatPercent(100.0 / 3.0))
     }
-
-    @Test
-    fun derivesOutputFileName() {
-        assertEquals("my_video_cut50.mp4", deriveOutputFileName("my video.mp4"))
-        assertEquals("clip_cut50.mp4", deriveOutputFileName("clip"))
-        assertEquals("shoo_cut_cut50.mp4", deriveOutputFileName("..."))
-    }
 }

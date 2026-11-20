@@ -15,7 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 1. Copy input URI to local temp file (if needed)
  * 2. For each segment: run FFmpeg stream copy to a temp output file
  * 3. Write each temp output to the SAF destination folder
- * 3. Clean up temp files
+ * 4. Delete temp segment file immediately after successful SAF write
+ * 5. Clean up temp files on completion/cancellation
  *
  * No re-encoding, no fallback. Stream copy only.
  */
@@ -154,6 +155,10 @@ class ProcessingManager(
                     val outputFileName = buildOutputFileName(metadata.displayName, segmentNumber)
                     val segmentUri = storage.writeFileToFolder(outputFolderUri, segmentOutput, outputFileName)
                     outputUris.add(segmentUri)
+
+                    // Delete temp segment file immediately after successful SAF write
+                    storage.deleteQuietly(segmentOutput)
+                    tempSegmentFiles.remove(segmentOutput)
 
                     postProgress(segmentPercentEnd, "Segment $segmentNumber/$totalSegments saved")
                     listener?.onSegmentComplete(segmentIndex, segmentUri)

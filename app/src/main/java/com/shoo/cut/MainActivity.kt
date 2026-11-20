@@ -19,7 +19,7 @@ import com.shoo.cut.databinding.ActivityMainBinding
 import java.util.concurrent.Executors
 
 /**
- * UI controller that communicates with ProcessingService via broadcasts.
+ * UI controller that communicates with ProcessingService via LocalBroadcastManager.
  * Does not own processing logic - delegates to foreground service.
  */
 class MainActivity : AppCompatActivity() {
@@ -70,6 +70,9 @@ class MainActivity : AppCompatActivity() {
         setupClickListeners()
         requestNotificationPermissionIfNeeded()
         registerReceivers()
+        
+        // Request current state FIRST, then reset UI
+        // This allows state restoration to overwrite the initial reset
         requestCurrentState()
         resetUi()
     }

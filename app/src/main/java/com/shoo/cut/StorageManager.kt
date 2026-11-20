@@ -52,8 +52,8 @@ class StorageManager(private val context: Context) {
 
     /** Streams [source] into a file inside the user-selected SAF folder [folderUri]. */
     fun writeFileToFolder(folderUri: Uri, source: File, fileName: String): Uri {
-        val documentsTree = DocumentsContract.getTreeDocumentId(folderUri)
-        val existingId = findDocumentInFolder(folderUri, fileName)
+        val treeDocId = DocumentsContract.getTreeDocumentId(folderUri)
+        val existingId = findDocumentInFolder(folderUri, fileName, treeDocId)
         val outputUri = if (existingId != null) {
             DocumentsContract.buildDocumentUriUsingTree(folderUri, existingId)
         } else {
@@ -71,6 +71,10 @@ class StorageManager(private val context: Context) {
 
         val output: OutputStream = context.contentResolver.openOutputStream(outputUri, "w")
             ?: throw StorageException("Cannot open output file for writing.")
+        
+        val sourceSize = source.length()
+        var written = 0L
+        
         source.inputStream().use { input ->
             output.use { out ->
                 val buffer = ByteArray(BUFFER_SIZE)
@@ -78,16 +82,23 @@ class StorageManager(private val context: Context) {
                     val read = input.read(buffer)
                     if (read < 0) break
                     out.write(buffer, 0, read)
+                    written += read
                 }
                 out.flush()
             }
         }
+        
+        // Verify written size matches source
+        if (written != sourceSize) {
+            throw StorageException("Output file size mismatch: expected $sourceSize bytes, wrote $written bytes")
+        }
+        
         return outputUri
     }
 
-    private fun findDocumentInFolder(folderUri: Uri, fileName: String): String? {
+    private fun findDocumentInFolder(folderUri: Uri, fileName: String, treeDocId: String): String? {
         val projection = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(folderUri, DocumentsContract.getTreeDocumentId(folderUri))
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(folderUri, treeDocId)
         context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
