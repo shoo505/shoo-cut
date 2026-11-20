@@ -1,204 +1,99 @@
-<<<<<<< HEAD
-
 name: Shoo Auto Cut Android APK Build
-=======
-name: Android CI Build
->>>>>>> 7cd09f5 (Build native Shoo Auto Cut Android app)
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+push:
+branches: [main]
+pull_request:
+branches: [main]
+workflow_dispatch:
 
 permissions:
-  contents: read
+contents: read
 
 concurrency:
-  group: android-build-${{ github.ref }}
-  cancel-in-progress: true
+group: android-build-${{ github.ref }}
+cancel-in-progress: true
 
 jobs:
-<<<<<<< HEAD
-  build-apk:
-    name: Build Shoo Auto Cut APK
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-=======
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
->>>>>>> 7cd09f5 (Build native Shoo Auto Cut Android app)
+build-apk:
+name: Build Shoo Auto Cut APK
+runs-on: ubuntu-latest
+timeout-minutes: 180
 
-    steps:
-      # 1. Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
 
-<<<<<<< HEAD
-      # 2. Setup Java
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+  - name: Setup JDK 17
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: '17'
+      cache: gradle
 
-      # 3. Setup Android SDK
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
+  - name: Setup Android SDK
+    uses: android-actions/setup-android@v4
 
-      # 4. Install required SDK packages
-      - name: Install Android SDK Components
-        run: |
-          echo "Updating Android SDK package list..."
-          sdkmanager --update
+  - name: Install Android SDK Components
+    run: |
+      sdkmanager --install \
+        "platforms;android-34" \
+        "platforms;android-35" \
+        "build-tools;34.0.0" \
+        "build-tools;35.0.0"
 
-          echo "Installing Android SDK packages..."
-          sdkmanager --install \
-            "platforms;android-33" \
-            "build-tools;33.0.2"
+  - name: Verify Android Project
+    run: |
+      if [ ! -f "./gradlew" ]; then
+        echo "ERROR: Gradle wrapper not found."
+        exit 1
+      fi
 
-          echo "Android SDK installation completed."
+      if [ ! -f "./settings.gradle" ] && \
+         [ ! -f "./settings.gradle.kts" ]; then
+        echo "ERROR: Gradle settings file not found."
+        exit 1
+      fi
 
-      # 5. Verify SDK
-      - name: Verify Android SDK
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+      chmod +x ./gradlew
+      ./gradlew --version
 
-          sdkmanager --list_installed
+  - name: Setup Gradle
+    uses: gradle/actions/setup-gradle@v4
 
-      # 6. Verify project structure
-      - name: Verify Android Project
-        run: |
-          echo "Checking repository..."
+  - name: Run Unit Tests
+    run: |
+      ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
-          if [ ! -f "./gradlew" ]; then
-            echo "ERROR: Gradle wrapper not found."
-            exit 1
-          fi
+  - name: Build Debug APK
+    run: |
+      ./gradlew assembleDebug --no-daemon --stacktrace
 
-          if [ ! -f "./settings.gradle" ] && \
-             [ ! -f "./settings.gradle.kts" ]; then
-            echo "ERROR: Gradle settings file not found."
-            exit 1
-          fi
+  - name: Verify APK
+    run: |
+      APK_COUNT=$(find . -type f \
+        -path "*/build/outputs/apk/debug/*.apk" | wc -l)
 
-          chmod +x ./gradlew
-=======
-      # --- Set up JDK ---
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: gradle
+      if [ "$APK_COUNT" -eq 0 ]; then
+        echo "ERROR: No APK was generated."
+        exit 1
+      fi
 
-      # --- Set up Android SDK ---
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          api-level: 34
-          build-tools: "34.0.0"
-          ndk: "25.1.8937434"
-          cmake: "3.22.1"
-          emulator: false
+      find . -type f \
+        -path "*/build/outputs/apk/debug/*.apk" \
+        -exec ls -lh {} \;
 
-      # --- Accept Android SDK licenses ---
-      - name: Accept Android SDK licenses
-        run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+  - name: Upload APK Artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: shoo-auto-cut-debug-apk
+      path: |
+        **/build/outputs/apk/debug/*.apk
+      if-no-files-found: error
+      retention-days: 30
 
-      # --- Install Gradle directly ---
-      - name: Install Gradle
-        run: |
-          GRADLE_VERSION=8.2
-          wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -O /tmp/gradle.zip
-          sudo unzip -q /tmp/gradle.zip -d /opt
-          sudo ln -sf /opt/gradle-${GRADLE_VERSION}/bin/gradle /usr/local/bin/gradle
-          gradle --version
-
-      # --- Run unit tests ---
-      - name: Run unit tests
-        run: |
-          gradle testDebugUnitTest --no-daemon
-
-      # --- Build debug APK ---
-      - name: Build debug APK
-        run: |
-          gradle assembleDebug --no-daemon
->>>>>>> 7cd09f5 (Build native Shoo Auto Cut Android app)
-
-          echo "Project structure verified."
-
-      # 7. Setup Gradle
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      # 8. Build APK
-      - name: Build Debug APK
-        run: |
-          ./gradlew assembleDebug \
-            --no-daemon \
-            --stacktrace
-
-      # 9. Verify APK
-      - name: Verify APK
-        run: |
-          echo "Searching for generated APK..."
-
-          find . -type f \
-            -path "*/build/outputs/apk/debug/*.apk"
-
-          APK_COUNT=$(find . -type f \
-            -path "*/build/outputs/apk/debug/*.apk" | wc -l)
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERROR: No APK was generated."
-            exit 1
-          fi
-
-          echo "APK generated successfully."
-
-      # 10. Upload APK
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-<<<<<<< HEAD
-          name: shoo-auto-cut-debug-apk
-          path: |
-            **/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 30
-
-      # 11. Build summary
-      - name: Build Summary
-        if: always()
-        run: |
-          echo "## Shoo Auto Cut Build" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          if [ "${{ job.status }}" = "success" ]; then
-            echo "Build completed successfully." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Build failed. Check the logs." >> "$GITHUB_STEP_SUMMARY"
-          fi
-=======
-          name: shoo-cut-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 30
-
-      # --- Report build status ---
-      - name: Report build status
-        if: always()
-        run: |
-          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
-          if [ -f "$APK_PATH" ]; then
-            echo "APK built successfully:"
-            ls -lh "$APK_PATH"
-          else
-            echo "APK was not produced!"
-            exit 1
-          fi
->>>>>>> 7cd09f5 (Build native Shoo Auto Cut Android app)
+  - name: Build Summary
+    if: always()
+    run: |
+      echo "## Shoo Auto Cut Android Build" >> "$GITHUB_STEP_SUMMARY"
+      echo "Status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
