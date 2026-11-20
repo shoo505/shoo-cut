@@ -35,6 +35,7 @@ class ProcessingService : Service() {
         const val EXTRA_INPUT_URI = "input_uri"
         const val EXTRA_OUTPUT_FOLDER_URI = "output_folder_uri"
         const val EXTRA_JOB_ID = "job_id"
+        const val EXTRA_JOB_STATE = "job_state"
 
         const val BROADCAST_PROGRESS = "com.shoo.cut.broadcast.PROGRESS"
         const val BROADCAST_SEGMENT_COMPLETE = "com.shoo.cut.broadcast.SEGMENT_COMPLETE"
@@ -229,7 +230,7 @@ class ProcessingService : Service() {
 
     private fun sendCompletedBroadcast(outputUris: List<Uri>) {
         val intent = Intent(BROADCAST_COMPLETED).apply {
-            putExtra(EXTRA_OUTPUT_URIS, outputUris)
+            putParcelableArrayListExtra(EXTRA_OUTPUT_URIS, ArrayList(outputUris))
         }
         sendBroadcast(intent)
     }

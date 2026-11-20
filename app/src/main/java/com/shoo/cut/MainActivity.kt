@@ -82,7 +82,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.buttonSelectFolder.setOnClickListener {
             if (!isProcessing()) {
-                pickOutputFolderLauncher.launch()
+                pickOutputFolderLauncher.launch(null)
             }
         }
         binding.buttonStart.setOnClickListener { onStartClicked() }
