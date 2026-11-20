@@ -29,10 +29,10 @@ data class VideoMetadata(
 }
 
 /**
- * Formats duration in seconds to a human-readable string.
+ * Formats a duration in seconds to a human-readable string.
  */
 fun formatDuration(seconds: Double): String {
-    val total = seconds.toInt().coerceAtLeast(0)
+    val total = seconds.toLong().coerceAtLeast(0)
     val hours = total / 3600
     val minutes = (total % 3600) / 60
     val secs = total % 60

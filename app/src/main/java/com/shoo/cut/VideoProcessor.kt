@@ -6,6 +6,8 @@ import com.github.pao11.libffmpeg.FFmpeg
 import com.github.pao11.libffmpeg.FFmpegExecuteResponseHandler
 import com.github.pao11.libffmpeg.exceptions.FFmpegNotSupportedException
 import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -29,10 +31,10 @@ interface ProcessingListener {
 }
 
 /**
- * Video processor that uses FFmpeg to trim, upscale to 720p with bicubic scaling,
- * and encode H.264/AAC MP4 output.
+ * Video processor that uses FFmpeg to trim multiple segments, concatenate,
+ * upscale to 720p with bicubic scaling, and encode H.264/AAC MP4 output.
  *
- * Pipeline: Probe -> Calculate timestamps -> Trim -> Bicubic scale -> Encode -> Export MP4
+ * Pipeline: Probe -> Calculate segments -> Trim each segment -> Concat -> Bicubic scale -> Encode -> Export MP4
  */
 class VideoProcessor(private val context: Context) {
 
@@ -47,7 +49,6 @@ class VideoProcessor(private val context: Context) {
      */
     fun isAvailable(): Boolean {
         try {
-            // Try to get library version - throws if not supported
             ffmpeg.getLibraryFFmpegVersion()
             return true
         } catch (e: FFmpegNotSupportedException) {
@@ -60,13 +61,26 @@ class VideoProcessor(private val context: Context) {
     }
 
     /**
-     * Processes a video: trim based on cut percentage/direction, bicubic upscale to 720p,
+     * Copies a content URI to a temporary file using streaming I/O.
+     */
+    private fun copyUriToTempFile(uri: android.net.Uri): File {
+        val tempFile = File(context.cacheDir, "input_${System.currentTimeMillis()}.tmp")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(tempFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+        return tempFile
+    }
+
+    /**
+     * Processes a video: trim multiple segments, concat, bicubic upscale to 720p,
      * encode H.264/AAC MP4.
      */
     fun processVideo(
-        inputPath: String,
-        outputPath: String,
-        autoCutResult: AutoCutResult,
+        inputUri: android.net.Uri,
+        outputUri: android.net.Uri,
+        cutPlan: CutPlan,
         listener: ProcessingListener
     ) {
         if (isRunning.get()) {
@@ -78,8 +92,23 @@ class VideoProcessor(private val context: Context) {
         cancelRequested.set(false)
         this.listener = listener
 
+        // Copy input URI to temp file for FFmpeg
+        val tempInputFile: File
         try {
-            listener.onProgress(5.0f, "Initializing FFmpeg...")
+            listener.onProgress(5.0f, "Preparing input file...")
+            tempInputFile = copyUriToTempFile(inputUri)
+            Log.d(TAG, "Copied input to temp file: ${tempInputFile.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to copy input URI", e)
+            isRunning.set(false)
+            listener.onError("Failed to prepare input file: ${e.message}")
+            return
+        }
+
+        val tempOutputFile = File(context.cacheDir, "output_${System.currentTimeMillis()}.mp4")
+
+        try {
+            listener.onProgress(10.0f, "Initializing FFmpeg...")
 
             // Ensure FFmpeg is available
             if (!isAvailable()) {
@@ -87,18 +116,15 @@ class VideoProcessor(private val context: Context) {
                 return
             }
 
-            listener.onProgress(10.0f, "Building FFmpeg command...")
+            listener.onProgress(15.0f, "Building FFmpeg command...")
 
             val command = buildFfmpegCommand(
-                inputPath = inputPath,
-                outputPath = outputPath,
-                startTime = autoCutResult.startTime,
-                endTime = autoCutResult.endTime,
-                sourceDuration = autoCutResult.sourceDuration,
-                hasAudio = true
+                inputPath = tempInputFile.absolutePath,
+                outputPath = tempOutputFile.absolutePath,
+                cutPlan = cutPlan
             )
 
-            listener.onProgress(15.0f, "Processing video...")
+            listener.onProgress(15.0f, "Processing video (${cutPlan.segments.size} segments)...")
 
             ffmpeg.execute(emptyMap(), command, object : FFmpegExecuteResponseHandler() {
                 override fun onStart() {
@@ -112,8 +138,8 @@ class VideoProcessor(private val context: Context) {
                     if (cancelRequested.get()) {
                         listener.onCancelled()
                     } else {
-                        listener.onProgress(95.0f, "Finalizing output...")
-                        listener.onCompleted(outputPath)
+                        listener.onProgress(90.0f, "Copying output to destination...")
+                        copyOutputToDestination(tempOutputFile, outputUri, listener)
                     }
                 }
 
@@ -121,12 +147,13 @@ class VideoProcessor(private val context: Context) {
                     Log.e(TAG, "FFmpeg failure: $message")
                     cancelRequested.set(false)
                     isRunning.set(false)
+                    cleanupTempFiles(tempInputFile, tempOutputFile)
                     listener.onError(message ?: context.getString(R.string.error_ffmpeg_encode))
                 }
 
                 override fun onProgress(message: String?) {
                     Log.d(TAG, "FFmpeg progress: $message")
-                    val progress = parseProgress(message ?: "")
+                    val progress = parseProgress(message ?: "", cutPlan.actualRetainedDuration)
                     listener.onProgress(progress, message ?: "Processing...")
                 }
 
@@ -138,11 +165,40 @@ class VideoProcessor(private val context: Context) {
         } catch (e: FFmpegNotSupportedException) {
             Log.e(TAG, "FFmpeg not supported", e)
             isRunning.set(false)
+            cleanupTempFiles(tempInputFile, tempOutputFile)
             listener.onError(context.getString(R.string.error_ffmpeg_init))
         } catch (e: Exception) {
             Log.e(TAG, "Processing error", e)
             isRunning.set(false)
+            cleanupTempFiles(tempInputFile, tempOutputFile)
             listener.onError(e.message ?: context.getString(R.string.error_unknown))
+        }
+    }
+
+    private fun copyOutputToDestination(source: File, destinationUri: android.net.Uri, listener: ProcessingListener) {
+        try {
+            context.contentResolver.openOutputStream(destinationUri)?.use { output ->
+                source.inputStream().use { input ->
+                    input.copyTo(output)
+                }
+            }
+            listener.onProgress(100.0f, "Completed!")
+            listener.onCompleted(destinationUri.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to copy output", e)
+            listener.onError("Failed to save output: ${e.message}")
+        } finally {
+            cleanupTempFiles()
+        }
+    }
+
+    private fun cleanupTempFiles(vararg files: File?) {
+        for (file in files) {
+            try {
+                file?.delete()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to delete temp file: $file", e)
+            }
         }
     }
 
@@ -159,11 +215,13 @@ class VideoProcessor(private val context: Context) {
     }
 
     /**
-     * Builds the FFmpeg command for trimming and bicubic scaling to 720p.
+     * Builds the FFmpeg command for trimming multiple segments, concatenating,
+     * bicubic scaling to 720p, and encoding H.264/AAC MP4.
      *
-     * Pipeline:
-     *   -ss <start> -t <duration> -i <input>  (fast input seeking)
-     *   -vf scale=1280:720:flags=bicubic:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1
+     * Pipeline (single pass):
+     *   For each segment: -ss <start> -t <duration> -i <input>
+     *   filter_complex: [0:v]trim=...[v0]; [1:v]trim=...[v1]; ... [v0][v1]...concat=n=N:v=1:a=0[vc]; [vc]scale=1280:720:flags=bicubic:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vout]
+     *   -map [vout]
      *   -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p
      *   -c:a aac -b:a 160k -ar 48000 -ac 2
      *   -f mp4 <output>
@@ -171,14 +229,10 @@ class VideoProcessor(private val context: Context) {
     private fun buildFfmpegCommand(
         inputPath: String,
         outputPath: String,
-        startTime: Double,
-        endTime: Double,
-        sourceDuration: Double,
-        hasAudio: Boolean
+        cutPlan: CutPlan
     ): Array<String> {
-        val duration = endTime - startTime
-        val durationStr = String.format("%.6f", duration.coerceAtLeast(0.0))
-        val startStr = String.format("%.6f", startTime.coerceAtLeast(0.0))
+        val segments = cutPlan.segments
+        val hasAudio = true // We'll check with -map 0:a? in the command
 
         val cmd = mutableListOf<String>()
 
@@ -190,23 +244,55 @@ class VideoProcessor(private val context: Context) {
         cmd.add("-stats_period")
         cmd.add("0.5")
 
-        // Fast input seeking: seek to start time before decoding
-        cmd.add("-ss")
-        cmd.add(startStr)
-        cmd.add("-t")
-        cmd.add(durationStr)
-        cmd.add("-i")
-        cmd.add(inputPath)
+        // Add input for each segment with fast seeking
+        for (segment in segments) {
+            val duration = segment.end - segment.start
+            val durationStr = String.format("%.6f", duration.coerceAtLeast(0.0))
+            val startStr = String.format("%.6f", segment.start.coerceAtLeast(0.0))
 
-        // Video filter: bicubic scale to 720p canvas with padding
-        val scaleFilter = "scale=1280:720:flags=bicubic:force_original_aspect_ratio=decrease:force_divisible_by=2"
-        val padFilter = "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black"
-        cmd.add("-vf")
-        cmd.add("$scaleFilter,$padFilter,setsar=1")
+            cmd.add("-ss")
+            cmd.add(startStr)
+            cmd.add("-t")
+            cmd.add(durationStr)
+            cmd.add("-i")
+            cmd.add(inputPath)
+        }
 
-        // Map video stream
+        // Build filter_complex for concatenation and scaling
+        val filterParts = mutableListOf<String>()
+
+        // Trim each input and label video/audio streams
+        for (i in segments.indices) {
+            val duration = segments[i].end - segments[i].start
+            val durationStr = String.format("%.6f", duration.coerceAtLeast(0.0))
+
+            // Video: trim and setpts
+            filterParts.add("[${i}:v]trim=duration=$durationStr,setpts=PTS-STARTPTS[v$i]")
+
+            // Audio: atrim and asetpts (if audio exists)
+            filterParts.add("[${i}:a]atrim=duration=$durationStr,asetpts=PTS-STARTPTS[a$i]")
+        }
+
+        // Concatenate all video and audio streams
+        val videoConcat = segments.indices.joinToString("") { "[v$it]" } + "concat=n=${segments.size}:v=1:a=0[vc]"
+        val audioConcat = segments.indices.joinToString("") { "[a$it]" } + "concat=n=${segments.size}:v=0:a=1[ac]"
+        filterParts.add(videoConcat)
+        filterParts.add(audioConcat)
+
+        // Scale and pad to 720p
+        filterParts.add("[vc]scale=1280:720:flags=bicubic:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vout]")
+
+        // Resample audio
+        filterParts.add("[ac]aresample=48000:async=1[aout]")
+
+        cmd.add("-filter_complex")
+        cmd.add(filterParts.joinToString(";"))
+
+        // Map output streams
         cmd.add("-map")
-        cmd.add("0:v:0")
+        cmd.add("[vout]")
+        cmd.add("-map")
+        cmd.add("[aout]")
 
         // Video codec: H.264
         cmd.add("-c:v")
@@ -220,19 +306,15 @@ class VideoProcessor(private val context: Context) {
         cmd.add("-profile:v")
         cmd.add("high")
 
-        // Handle audio if present
-        if (hasAudio) {
-            cmd.add("-map")
-            cmd.add("0:a:0?")
-            cmd.add("-c:a")
-            cmd.add("aac")
-            cmd.add("-b:a")
-            cmd.add("160k")
-            cmd.add("-ar")
-            cmd.add("48000")
-            cmd.add("-ac")
-            cmd.add("2")
-        }
+        // Audio codec: AAC
+        cmd.add("-c:a")
+        cmd.add("aac")
+        cmd.add("-b:a")
+        cmd.add("160k")
+        cmd.add("-ar")
+        cmd.add("48000")
+        cmd.add("-ac")
+        cmd.add("2")
 
         // MP4 output options
         cmd.add("-movflags")
@@ -243,13 +325,14 @@ class VideoProcessor(private val context: Context) {
         cmd.add("mp4")
         cmd.add(outputPath)
 
+        Log.d("VideoProcessor", "FFmpeg command: ${cmd.joinToString(" ")}")
         return cmd.toTypedArray()
     }
 
     /**
      * Parses FFmpeg progress percentage from log message.
      */
-    private fun parseProgress(message: String): Float {
+    private fun parseProgress(message: String, totalDuration: Double): Float {
         // FFmpeg progress messages may contain time=HH:MM:SS.mmm
         val timeRegex = Regex("time=(\\d+):(\\d+):(\\d+\\.\\d+)")
         val match = timeRegex.find(message)
@@ -258,8 +341,9 @@ class VideoProcessor(private val context: Context) {
             val m = match.groupValues[2].toInt()
             val s = match.groupValues[3].toDouble()
             val currentTime = h * 3600 + m * 60 + s
-            // Return a rough progress estimate (0-95%)
-            return (currentTime * 10.0f).coerceIn(0.0f, 95.0f)
+            // Return progress percentage (0-95%)
+            val percent = (currentTime / totalDuration * 95.0).coerceIn(0.0, 95.0)
+            return percent.toFloat()
         }
         return 0.0f
     }

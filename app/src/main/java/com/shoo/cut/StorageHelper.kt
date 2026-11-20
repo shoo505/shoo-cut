@@ -1,12 +1,11 @@
 package com.shoo.cut
 
-import android.app.Activity
 import android.content.ContentResolver
+import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
-import android.content.ContentUris
 import android.provider.DocumentsContract
 import android.webkit.MimeTypeMap
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,18 +30,20 @@ object StorageHelper {
     }
 
     /**
-     * Creates an intent to pick/create an output directory using SAF.
+     * Creates an intent to pick/create an output file using SAF.
      */
-    fun createPickOutputDirIntent(): Intent {
+    fun createPickOutputFileIntent(): Intent {
         return Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_TITLE, "Shoo Auto Cut")
+            type = "video/mp4"
+            putExtra(Intent.EXTRA_TITLE, generateOutputFilename("video", DEFAULT_CUT_PERCENTAGE, CutDirection.REMOVE_BEGINNING))
         }
     }
 
     /**
      * Gets the file path from a content URI. Returns null if not directly accessible.
+     * This is a best-effort attempt - for content:// URIs that don't have a direct
+     * file path, the caller should copy the content using ContentResolver.
      */
     fun getPathFromUri(context: Context, uri: Uri): String? {
         val contentResolver: ContentResolver = context.contentResolver

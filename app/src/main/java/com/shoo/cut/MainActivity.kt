@@ -11,7 +11,6 @@ import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
 import androidx.appcompat.app.AppCompatActivity
 import com.shoo.cut.databinding.ActivityMainBinding
 import java.io.File
-import kotlin.collections.emptyMap
 
 class MainActivity : AppCompatActivity() {
 
@@ -20,11 +19,10 @@ class MainActivity : AppCompatActivity() {
 
     // State
     private var selectedVideoUri: Uri? = null
-    private var selectedVideoPath: String? = null
     private var videoMetadata: VideoMetadata? = null
     private var currentCutPercentage: Double = DEFAULT_CUT_PERCENTAGE
     private var currentCutDirection: CutDirection = CutDirection.REMOVE_BEGINNING
-    private var outputFilePath: String? = null
+    private var outputUri: Uri? = null
     private var isProcessing = false
 
     private val TAG = "MainActivity"
@@ -36,7 +34,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val pickOutputDirLauncher = registerForActivityResult(CreateDocument()) { uri ->
+    private val pickOutputFileLauncher = registerForActivityResult(CreateDocument()) { uri ->
         if (uri != null) {
             selectOutputLocation(uri)
         }
@@ -64,39 +62,44 @@ class MainActivity : AppCompatActivity() {
 
     private fun selectVideo(uri: Uri) {
         selectedVideoUri = uri
+        videoMetadata = null // Reset metadata
 
-        // Try to get the file path
-        val path = StorageHelper.getPathFromUri(this, uri)
-        selectedVideoPath = path
+        binding.textSelectedFilename.text = uri.lastPathSegment ?: "Unknown video"
+        binding.textVideoInfo.text = "Loading metadata..."
+        binding.textVideoCodec.text = "Video Codec: --"
+        binding.textAudioCodec.text = "Audio Codec: --"
 
-        if (path == null) {
-            // SAF URI - can't get direct path, use content resolver approach
-            // For now, show the URI and try to probe via FFmpeg using the URI
-            binding.textSelectedFilename.text = uri.lastPathSegment ?: "Unknown video"
-            binding.textVideoInfo.text = "Video selected via Storage Access Framework"
-            binding.textVideoCodec.text = "Video Codec: --"
-            binding.textAudioCodec.text = "Audio Codec: --"
-            Toast.makeText(this, "Video selected (path access limited)", Toast.LENGTH_SHORT).show()
-        } else {
-            val file = File(path)
-            binding.textSelectedFilename.text = file.name
-            val sizeStr = StorageHelper.formatFileSize(file.length())
-            binding.textVideoInfo.text = "Size: $sizeStr"
-
-            // Probe video metadata
-            probeVideoMetadata(path)
-        }
-
+        // Probe video metadata
+        probeVideoMetadata(uri)
         updatePreview()
     }
 
-    private fun probeVideoMetadata(path: String) {
+    private fun probeVideoMetadata(uri: Uri) {
+        // We need a temporary file path to probe with FFmpeg
+        // Copy URI to temp file first
+        val tempFile = File(cacheDir, "probe_${System.currentTimeMillis()}.tmp")
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                java.io.FileOutputStream(tempFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to copy URI for probing", e)
+            runOnUiThread {
+                binding.textVideoInfo.text = "Failed to load metadata"
+                binding.textVideoCodec.text = "Video Codec: --"
+                binding.textAudioCodec.text = "Audio Codec: --"
+            }
+            return
+        }
+
         // Use FFmpeg to probe the video
         val probeCommand = arrayOf(
             "-v", "error",
             "-show_entries", "format=duration,size,format_name:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,sample_rate,channels",
             "-of", "default=noprint_wrappers=1",
-            path
+            tempFile.absolutePath
         )
 
         videoProcessor.ffmpeg.execute(emptyMap(), probeCommand, object : com.github.pao11.libffmpeg.FFmpegExecuteResponseHandler() {
@@ -104,7 +107,9 @@ class MainActivity : AppCompatActivity() {
 
             override fun onSuccess(message: String?) {
                 runOnUiThread {
-                    parseProbeOutput(message ?: "", path)
+                    parseProbeOutput(message ?: "", tempFile.absolutePath, uri)
+                    // Clean up temp file
+                    tempFile.delete()
                 }
             }
 
@@ -113,6 +118,8 @@ class MainActivity : AppCompatActivity() {
                     Log.w(TAG, "Probe failed: $message")
                     binding.textVideoCodec.text = "Video Codec: --"
                     binding.textAudioCodec.text = "Audio Codec: --"
+                    binding.textVideoInfo.text = "Failed to load metadata"
+                    tempFile.delete()
                 }
             }
 
@@ -122,7 +129,7 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun parseProbeOutput(output: String, path: String) {
+    private fun parseProbeOutput(output: String, path: String, originalUri: Uri) {
         var duration: Double = 0.0
         var width: Int = 0
         var height: Int = 0
@@ -190,7 +197,7 @@ class MainActivity : AppCompatActivity() {
 
         videoMetadata = VideoMetadata(
             path = path,
-            filename = File(path).name,
+            filename = originalUri.lastPathSegment ?: "video",
             durationSeconds = duration,
             width = width,
             height = height,
@@ -277,21 +284,23 @@ class MainActivity : AppCompatActivity() {
             binding.previewRemovedDuration.text = "Removed: --"
             binding.previewRetainedDuration.text = "Retained: --"
             binding.previewDirection.text = "Direction: ${currentCutDirection.toReadableString()}"
+            binding.previewSegments.text = "Segments: --"
             return
         }
 
         try {
-            val result = calculateAutoCut(
+            val cutPlan = calculateCutPlan(
                 sourceDuration = videoMetadata!!.durationSeconds,
                 cutPercentage = currentCutPercentage,
                 cutDirection = currentCutDirection
             )
 
             binding.previewOriginalDuration.text = "Original: ${formatDuration(videoMetadata!!.durationSeconds)}"
-            binding.previewCutPercentage.text = "Cut: ${result.cutPercentage.toInt()}% removed"
-            binding.previewRemovedDuration.text = "Removed: ${result.removedDurationLabel}"
-            binding.previewRetainedDuration.text = "Retained: ${result.retainedDurationLabel}"
+            binding.previewCutPercentage.text = "Cut: ${cutPlan.cutPercentage.toInt()}% removed"
+            binding.previewRemovedDuration.text = "Removed: ${formatDuration(cutPlan.sourceDuration - cutPlan.actualRetainedDuration)}"
+            binding.previewRetainedDuration.text = "Retained: ${formatDuration(cutPlan.actualRetainedDuration)} (${String.format("%.1f", cutPlan.effectiveRetentionPercent)}%)"
             binding.previewDirection.text = "Direction: ${currentCutDirection.toReadableString()}"
+            binding.previewSegments.text = "Segments: ${cutPlan.segments.size} (distributed)"
             binding.previewOutputResolution.text = "Output Resolution: 1280 x 720"
             binding.previewScalingAlgorithm.text = "Scaling Algorithm: Bicubic"
             binding.previewOutputFormat.text = "Output Format: MP4"
@@ -301,7 +310,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startProcessing() {
-        if (selectedVideoPath == null) {
+        if (selectedVideoUri == null) {
             Toast.makeText(this, R.string.error_invalid_video, Toast.LENGTH_SHORT).show()
             return
         }
@@ -312,27 +321,28 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Determine output location
-        if (outputFilePath == null) {
+        if (outputUri == null) {
             // Prompt user to select output location
-            pickOutputDirLauncher.launch(arrayOf("*/*"))
+            pickOutputFileLauncher.launch(arrayOf("video/mp4"))
             return
         }
 
-        val outputFile = File(outputFilePath)
-        if (outputFile.exists()) {
-            // Ask for overwrite confirmation
-            AlertDialog.Builder(this)
-                .setTitle("File Exists")
-                .setMessage("The output file already exists. Overwrite?")
-                .setPositiveButton("Overwrite") { _, _ -> doProcess() }
-                .setNegativeButton("Cancel") { _, _ -> }
-                .show()
-        } else {
-            doProcess()
+        val cutPlan = calculateCutPlan(
+            sourceDuration = videoMetadata!!.durationSeconds,
+            cutPercentage = currentCutPercentage,
+            cutDirection = currentCutDirection
+        )
+
+        // Check if we have enough segments
+        if (cutPlan.segments.isEmpty()) {
+            Toast.makeText(this, "No valid segments to process", Toast.LENGTH_SHORT).show()
+            return
         }
+
+        doProcess(cutPlan)
     }
 
-    private fun doProcess() {
+    private fun doProcess(cutPlan: CutPlan) {
         isProcessing = true
         binding.buttonStartProcessing.isEnabled = false
         binding.buttonStartProcessing.text = getString(R.string.processing)
@@ -342,16 +352,10 @@ class MainActivity : AppCompatActivity() {
         binding.textProgressPercent.text = "0%"
 
         try {
-            val result = calculateAutoCut(
-                sourceDuration = videoMetadata!!.durationSeconds,
-                cutPercentage = currentCutPercentage,
-                cutDirection = currentCutDirection
-            )
-
             videoProcessor.processVideo(
-                inputPath = selectedVideoPath!!,
-                outputPath = outputFilePath!!,
-                autoCutResult = result,
+                inputUri = selectedVideoUri!!,
+                outputUri = outputUri!!,
+                cutPlan = cutPlan,
                 listener = object : VideoProcessor.ProcessingListener {
                     override fun onProgress(percent: Float, message: String) {
                         runOnUiThread {
@@ -370,7 +374,7 @@ class MainActivity : AppCompatActivity() {
                             binding.progressBar.progress = 100
                             binding.textStatus.text = getString(R.string.completed)
                             binding.textProgressPercent.text = "100%"
-                            binding.textOutputLocation.text = "Output Location: $outputPath"
+                            binding.textOutputLocation.text = "Output: $outputPath"
                             Toast.makeText(this@MainActivity, "Processing completed!", Toast.LENGTH_LONG).show()
                         }
                     }
@@ -414,24 +418,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun selectOutputLocation(uri: Uri) {
-        val path = StorageHelper.getPathFromUri(this, uri)
-        if (path != null) {
-            outputFilePath = path
-            // Ensure it ends with .mp4
-            if (!outputFilePath!!.endsWith(".mp4", ignoreCase = true)) {
-                outputFilePath = outputFilePath + ".mp4"
-            }
-            binding.textOutputLocation.text = "Output Location: $outputFilePath"
-            Toast.makeText(this, "Output location set", Toast.LENGTH_SHORT).show()
-        } else {
-            // Can't get direct path from SAF URI
-            outputFilePath = uri.path
-            binding.textOutputLocation.text = "Output Location: $outputFilePath (via SAF)"
-        }
+        outputUri = uri
+        binding.textOutputLocation.text = "Output: ${uri.lastPathSegment}"
+        Toast.makeText(this, "Output location set", Toast.LENGTH_SHORT).show()
     }
 
     private fun formatDuration(seconds: Double): String {
-        val total = seconds.toInt().coerceAtLeast(0)
+        val total = seconds.toLong().coerceAtLeast(0)
         val hours = total / 3600
         val minutes = (total % 3600) / 60
         val secs = total % 60

@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
-class AutoCutCalculatorTest {
+class SegmentSelectorTest {
 
     @Test
     fun testCutPercentagesAreCorrect() {
@@ -17,27 +17,28 @@ class AutoCutCalculatorTest {
     fun testRemoveBeginning50Percent() {
         // 11-hour video = 39600 seconds
         val sourceDuration = 11.0 * 3600.0
-        val result = calculateAutoCut(sourceDuration, 50.0, CutDirection.REMOVE_BEGINNING)
+        val plan = calculateCutPlan(sourceDuration, 50.0, CutDirection.REMOVE_BEGINNING)
 
-        assertEquals(50.0, result.cutPercentage)
-        assertEquals(CutDirection.REMOVE_BEGINNING, result.cutDirection)
-        assertEquals(5.5 * 3600.0, result.removedDuration, 0.001) // 5h30m removed
-        assertEquals(5.5 * 3600.0, result.retainedDuration, 0.001) // 5h30m retained
-        assertEquals(5.5 * 3600.0, result.startTime, 0.001) // start at 5h30m
-        assertEquals(sourceDuration, result.endTime, 0.001) // end at 11h
+        assertEquals(50.0, plan.cutPercentage)
+        assertEquals(CutDirection.REMOVE_BEGINNING, plan.cutDirection)
+        assertEquals(5.5 * 3600.0, plan.sourceDuration - plan.actualRetainedDuration, 1.0) // ~5h30m removed
+        assertEquals(5.5 * 3600.0, plan.actualRetainedDuration, 1.0) // ~5h30m retained
+        assertEquals(sourceDuration, plan.segments.last().end, 0.001) // end at 11h
+        assertTrue(plan.segments.size >= 1) // Should have at least 1 segment
     }
 
     @Test
     fun testRemoveEnding50Percent() {
         val sourceDuration = 11.0 * 3600.0
-        val result = calculateAutoCut(sourceDuration, 50.0, CutDirection.REMOVE_ENDING)
+        val plan = calculateCutPlan(sourceDuration, 50.0, CutDirection.REMOVE_ENDING)
 
-        assertEquals(50.0, result.cutPercentage)
-        assertEquals(CutDirection.REMOVE_ENDING, result.cutDirection)
-        assertEquals(5.5 * 3600.0, result.removedDuration, 0.001) // 5h30m removed
-        assertEquals(5.5 * 3600.0, result.retainedDuration, 0.001) // 5h30m retained
-        assertEquals(0.0, result.startTime, 0.001) // start at 0
-        assertEquals(5.5 * 3600.0, result.endTime, 0.001) // end at 5h30m
+        assertEquals(50.0, plan.cutPercentage)
+        assertEquals(CutDirection.REMOVE_ENDING, plan.cutDirection)
+        assertEquals(5.5 * 3600.0, plan.sourceDuration - plan.actualRetainedDuration, 1.0) // ~5h30m removed
+        assertEquals(5.5 * 3600.0, plan.actualRetainedDuration, 1.0) // ~5h30m retained
+        assertEquals(0.0, plan.segments.first().start, 0.001) // start at 0
+        assertEquals(sourceDuration / 2.0, plan.segments.last().end, 1.0) // end at ~5h30m
+        assertTrue(plan.segments.size >= 1)
     }
 
     @Test
@@ -53,11 +54,14 @@ class AutoCutCalculatorTest {
         )
 
         for ((pct, expected) in testCases) {
-            val result = calculateAutoCut(sourceDuration, pct, CutDirection.REMOVE_BEGINNING)
-            assertEquals(expected.first, result.removedDuration, 0.001, "Removed duration for $pct%")
-            assertEquals(expected.second, result.retainedDuration, 0.001, "Retained duration for $pct%")
-            assertEquals(expected.first, result.startTime, 0.001, "Start time for $pct%")
-            assertEquals(sourceDuration, result.endTime, 0.001, "End time for $pct%")
+            val plan = calculateCutPlan(sourceDuration, pct, CutDirection.REMOVE_BEGINNING)
+            assertEquals(expected.first, plan.sourceDuration - plan.actualRetainedDuration, 1.0, "Removed duration for $pct%")
+            assertEquals(expected.second, plan.actualRetainedDuration, 1.0, "Retained duration for $pct%")
+            assertTrue(plan.segments.size >= 1, "Should have at least 1 segment for $pct%")
+            // Verify chronological order and no overlaps
+            for (i in 1 until plan.segments.size) {
+                assertTrue(plan.segments[i].start >= plan.segments[i - 1].end, "Segments should not overlap for $pct%")
+            }
         }
     }
 
@@ -74,36 +78,37 @@ class AutoCutCalculatorTest {
         )
 
         for ((pct, expected) in testCases) {
-            val result = calculateAutoCut(sourceDuration, pct, CutDirection.REMOVE_ENDING)
-            assertEquals(expected.first, result.removedDuration, 0.001, "Removed duration for $pct%")
-            assertEquals(expected.second, result.retainedDuration, 0.001, "Retained duration for $pct%")
-            assertEquals(0.0, result.startTime, 0.001, "Start time for $pct%")
-            assertEquals(expected.second, result.endTime, 0.001, "End time for $pct%")
+            val plan = calculateCutPlan(sourceDuration, pct, CutDirection.REMOVE_ENDING)
+            assertEquals(expected.first, plan.sourceDuration - plan.actualRetainedDuration, 1.0, "Removed duration for $pct%")
+            assertEquals(expected.second, plan.actualRetainedDuration, 1.0, "Retained duration for $pct%")
+            assertTrue(plan.segments.size >= 1, "Should have at least 1 segment for $pct%")
+            // Verify chronological order and no overlaps
+            for (i in 1 until plan.segments.size) {
+                assertTrue(plan.segments[i].start >= plan.segments[i - 1].end, "Segments should not overlap for $pct%")
+            }
         }
     }
 
     @Test
     fun testZeroDurationThrows() {
         assertFailsWith<IllegalArgumentException> {
-            calculateAutoCut(0.0, 50.0, CutDirection.REMOVE_BEGINNING)
+            calculateCutPlan(0.0, 50.0, CutDirection.REMOVE_BEGINNING)
         }
     }
 
     @Test
     fun testNegativeDurationThrows() {
         assertFailsWith<IllegalArgumentException> {
-            calculateAutoCut(-10.0, 50.0, CutDirection.REMOVE_BEGINNING)
+            calculateCutPlan(-10.0, 50.0, CutDirection.REMOVE_BEGINNING)
         }
     }
 
     @Test
     fun testShortVideo() {
         // Very short video: 1 second
-        val result = calculateAutoCut(1.0, 50.0, CutDirection.REMOVE_BEGINNING)
-        assertEquals(0.5, result.removedDuration, 0.001)
-        assertEquals(0.5, result.retainedDuration, 0.001)
-        assertEquals(0.5, result.startTime, 0.001)
-        assertEquals(1.0, result.endTime, 0.001)
+        val plan = calculateCutPlan(1.0, 50.0, CutDirection.REMOVE_BEGINNING)
+        assertEquals(0.5, plan.sourceDuration - plan.actualRetainedDuration, 0.01)
+        assertEquals(0.5, plan.actualRetainedDuration, 0.01)
     }
 
     @Test
@@ -147,5 +152,32 @@ class AutoCutCalculatorTest {
 
         val name2 = StorageHelper.generateOutputFilename("my_video.mp4", 75.0, CutDirection.REMOVE_ENDING)
         assertTrue(name2.contains("removeend"))
+    }
+
+    @Test
+    fun testSegmentChronologicalOrder() {
+        val sourceDuration = 1000.0 // 1000 seconds
+        val plan = calculateCutPlan(sourceDuration, 50.0, CutDirection.REMOVE_BEGINNING)
+
+        // Verify all segments are in chronological order
+        var prevEnd = 0.0
+        for (segment in plan.segments) {
+            assertTrue(segment.start >= prevEnd, "Segment ${segment.index} starts before previous ends")
+            assertTrue(segment.end > segment.start, "Segment ${segment.index} has negative duration")
+            prevEnd = segment.end
+        }
+    }
+
+    @Test
+    fun testSegmentDistribution() {
+        // Test that segments are distributed across the retained portion
+        val sourceDuration = 3600.0 // 1 hour
+        val plan = calculateCutPlan(sourceDuration, 50.0, CutDirection.REMOVE_ENDING)
+
+        // With 50% cut and REMOVE_ENDING, retained portion is 0-1800s
+        // Should have multiple segments distributed
+        assertTrue(plan.segments.size >= 1)
+        assertEquals(0.0, plan.segments.first().start, 0.01)
+        assertTrue(plan.segments.last().end <= 1800.0)
     }
 }

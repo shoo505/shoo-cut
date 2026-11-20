@@ -304,6 +304,13 @@
                             android:textAppearance="?attr/textAppearanceBody1" />
 
                         <TextView
+                            android:id="@+id/previewSegments"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Segments: --"
+                            android:textAppearance="?attr/textAppearanceBody1" />
+
+                        <TextView
                             android:id="@+id/previewOutputResolution"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
