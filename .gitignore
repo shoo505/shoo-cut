@@ -1,23 +1,25 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
+# Build output
+.gradle/
 build/
-dist/
-.venv/
-venv/
+*/build/
+captures/
+.externalNativeBuild/
+.cxx/
 
-# Test and local output
-.pytest_cache/
-.coverage
-htmlcov/
-test-output/
-/tmp-*/
+# Local configuration
+local.properties
+*.iml
+.idea/
+
+# Tests and reports
+reports/
+*.hprof
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+
+# App-specific temp files
 *.partial.mp4
 .shoo-cut-*.mp4
-
-# Editor / OS noise
-.DS_Store
-.vscode/
-.idea/

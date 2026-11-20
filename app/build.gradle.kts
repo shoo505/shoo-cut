@@ -23,18 +23,15 @@ android {
                 "proguard-rules.pro"
             )
         }
-        debug {
-            isDebuggable = true
-        }
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
 
     buildFeatures {
@@ -43,21 +40,33 @@ android {
 
     packaging {
         resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1,LICENSE}"
+            excludes += setOf(
+                "/META-INF/AL2.0",
+                "/META-INF/LGPL2.1",
+                "/META-INF/LICENSE",
+                "/META-INF/LICENSE.txt",
+                "/META-INF/NOTICE",
+                "/META-INF/NOTICE.txt"
+            )
         }
         jniLibs {
-            excludes += "/META-INF/**"
+            // The FFmpeg binary in the pao11 AAR is executed as a process, so the
+            // native library must be extracted (and executable) at install time.
+            useLegacyPackaging = true
         }
     }
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlin:kotlin-stdlib:1.9.20")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.activity:activity-ktx:1.9.0")
-    implementation("androidx.fragment:fragment-ktx:1.6.2")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+
+    // Verified on Maven Central: ships libffmpeg.so for arm64-v8a and
+    // armeabi-v7a, built with libx264, the native AAC encoder, bicubic scale,
+    // concat/pad/trim filters. No ffprobe binary is included.
     implementation("io.github.pao11:ffmpeg-android:1.1.0")
+
+    testImplementation("junit:junit:4.13.2")
 }

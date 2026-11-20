@@ -1,0 +1,32 @@
+package com.shoo.cut
+
+import android.content.Intent
+
+/** Intents and naming helpers for the Storage Access Framework. */
+object VideoPicker {
+
+    const val VIDEO_MIME_TYPE = "video/*"
+    const val MP4_MIME_TYPE = "video/mp4"
+
+    /** Intent that opens the system picker for a readable video document. */
+    fun pickVideoIntent(): Intent =
+        Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = VIDEO_MIME_TYPE
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+
+    /** Intent that lets the user pick where the MP4 should be written. */
+    fun createOutputIntent(suggestedName: String): Intent =
+        Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = MP4_MIME_TYPE
+            putExtra(Intent.EXTRA_TITLE, suggestedName)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+
+    /** Derives a friendly `*_cut50.mp4` name from the source display name. */
+    fun buildOutputFileName(sourceDisplayName: String): String =
+        deriveOutputFileName(sourceDisplayName)
+}

@@ -1,44 +1,32 @@
 package com.shoo.cut
 
 /**
- * Data class representing video metadata extracted via FFprobe.
+ * Immutable description of the video the user selected.
+ *
+ * [width] and [height] are the coded dimensions reported by the platform;
+ * [rotationDegrees] describes how the picture must be rotated for display.
  */
 data class VideoMetadata(
-    val path: String,
-    val filename: String,
-    val durationSeconds: Double,
+    val uriString: String,
+    val displayName: String,
+    val durationMs: Long,
     val width: Int,
     val height: Int,
-    val fps: Double?,
-    val videoCodec: String,
-    val audioCodec: String?,
-    val audioChannels: Int?,
-    val audioSampleRate: Int?,
-    val container: String,
-    val formatName: String,
-    val sizeBytes: Long,
-    val bitrate: Int?,
-    val rotation: Int = 0,
-    val hasAudio: Boolean = false
+    val rotationDegrees: Int,
+    val hasAudio: Boolean,
+    val sizeBytes: Long
 ) {
-    val durationLabel: String
-        get() = formatDuration(durationSeconds)
+    val durationSeconds: Double
+        get() = durationMs / 1000.0
 
-    val resolutionLabel: String
-        get() = "$width x $height"
-}
+    val isValid: Boolean
+        get() = durationMs > 0L && width > 0 && height > 0
 
-/**
- * Formats a duration in seconds to a human-readable string.
- */
-fun formatDuration(seconds: Double): String {
-    val total = seconds.toLong().coerceAtLeast(0)
-    val hours = total / 3600
-    val minutes = (total % 3600) / 60
-    val secs = total % 60
-    return when {
-        hours > 0 -> "$hours h ${String.format("%02d", minutes)} m ${String.format("%02d", secs)} s"
-        minutes > 0 -> "$minutes m ${String.format("%02d", secs)} s"
-        else -> "$secs s"
-    }
+    /** Width after applying rotation metadata. */
+    val displayWidth: Int
+        get() = if (rotationDegrees % 180 != 0) height else width
+
+    /** Height after applying rotation metadata. */
+    val displayHeight: Int
+        get() = if (rotationDegrees % 180 != 0) width else height
 }
