@@ -197,7 +197,7 @@ class ProcessingService : Service() {
     }
 
     private fun calculateEta(percent: Int, now: Long): Long? {
-        if (percent <= 0 || jobStartTime == 0) return null
+        if (percent <= 0 || jobStartTime == 0L) return null
         val elapsed = now - jobStartTime
         if (elapsed < 2000L) return null // Need some progress data first
         val estimatedTotal = (elapsed * 100.0 / percent).toLong()
