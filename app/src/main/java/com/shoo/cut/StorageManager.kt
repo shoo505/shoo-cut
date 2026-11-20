@@ -2,6 +2,7 @@ package com.shoo.cut
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -12,7 +13,7 @@ class StorageException(message: String, cause: Throwable? = null) : Exception(me
 
 /**
  * Owns all file-system work: application cache temp files, streaming copies from
- * `content://` URIs, streaming writes to the SAF destination and free-space
+ * `content://` URIs, streaming writes to the SAF destination folder and free-space
  * checks. Nothing here loads a whole video into memory.
  */
 class StorageManager(private val context: Context) {
@@ -49,10 +50,27 @@ class StorageManager(private val context: Context) {
         }
     }
 
-    /** Streams [source] into the user-selected SAF [destination]. */
-    fun writeFileToUri(source: File, destination: Uri) {
-        val output: OutputStream = context.contentResolver.openOutputStream(destination, "w")
-            ?: throw StorageException("Cannot open the output location for writing.")
+    /** Streams [source] into a file inside the user-selected SAF folder [folderUri]. */
+    fun writeFileToFolder(folderUri: Uri, source: File, fileName: String): Uri {
+        val documentsTree = DocumentsContract.getTreeDocumentId(folderUri)
+        val existingId = findDocumentInFolder(folderUri, fileName)
+        val outputUri = if (existingId != null) {
+            DocumentsContract.buildDocumentUriUsingTree(folderUri, existingId)
+        } else {
+            val newDoc = DocumentsContract.createDocument(
+                context.contentResolver,
+                folderUri,
+                "video/mp4",
+                fileName
+            )
+            if (newDoc == null) {
+                throw StorageException("Cannot create output file in selected folder.")
+            }
+            newDoc
+        }
+
+        val output: OutputStream = context.contentResolver.openOutputStream(outputUri, "w")
+            ?: throw StorageException("Cannot open output file for writing.")
         source.inputStream().use { input ->
             output.use { out ->
                 val buffer = ByteArray(BUFFER_SIZE)
@@ -64,6 +82,25 @@ class StorageManager(private val context: Context) {
                 out.flush()
             }
         }
+        return outputUri
+    }
+
+    private fun findDocumentInFolder(folderUri: Uri, fileName: String): String? {
+        val projection = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(folderUri, DocumentsContract.getTreeDocumentId(folderUri))
+        context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                while (!cursor.isAfterLast) {
+                    if (cursor.getString(nameIndex) == fileName) {
+                        return cursor.getString(idIndex)
+                    }
+                    cursor.moveToNext()
+                }
+            }
+        }
+        return null
     }
 
     /** True when the cache partition can hold [requiredBytes] plus a safety margin. */

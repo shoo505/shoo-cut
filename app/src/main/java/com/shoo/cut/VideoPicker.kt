@@ -17,13 +17,12 @@ object VideoPicker {
             addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
 
-    /** Intent that lets the user pick where the MP4 should be written. */
-    fun createOutputIntent(suggestedName: String): Intent =
-        Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = MP4_MIME_TYPE
-            putExtra(Intent.EXTRA_TITLE, suggestedName)
+    /** Intent that lets the user pick a folder for output files. */
+    fun pickOutputFolderIntent(): Intent =
+        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
 
     /** Derives a friendly `*_cut50.mp4` name from the source display name. */

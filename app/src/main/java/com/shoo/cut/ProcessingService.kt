@@ -21,7 +21,7 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
- * Foreground service that handles video processing independently of the Activity lifecycle.
+ * Foreground service that handles 4-segment stream-copy processing independently of the Activity lifecycle.
  * Continues processing when app is minimized, screen is off, or Activity is destroyed.
  */
 class ProcessingService : Service() {
@@ -33,11 +33,11 @@ class ProcessingService : Service() {
         const val ACTION_GET_STATE = "com.shoo.cut.action.GET_STATE"
 
         const val EXTRA_INPUT_URI = "input_uri"
-        const val EXTRA_OUTPUT_URI = "output_uri"
+        const val EXTRA_OUTPUT_FOLDER_URI = "output_folder_uri"
         const val EXTRA_JOB_ID = "job_id"
-        const val EXTRA_JOB_STATE = "job_state"
 
         const val BROADCAST_PROGRESS = "com.shoo.cut.broadcast.PROGRESS"
+        const val BROADCAST_SEGMENT_COMPLETE = "com.shoo.cut.broadcast.SEGMENT_COMPLETE"
         const val BROADCAST_COMPLETED = "com.shoo.cut.broadcast.COMPLETED"
         const val BROADCAST_ERROR = "com.shoo.cut.broadcast.ERROR"
         const val BROADCAST_CANCELLED = "com.shoo.cut.broadcast.CANCELLED"
@@ -46,7 +46,8 @@ class ProcessingService : Service() {
         const val EXTRA_PROGRESS = "progress"
         const val EXTRA_STATUS = "status"
         const val EXTRA_ETA_MILLIS = "eta_millis"
-        const val EXTRA_MODE = "mode"
+        const val EXTRA_SEGMENT_INDEX = "segment_index"
+        const val EXTRA_OUTPUT_URIS = "output_uris"
         const val EXTRA_ERROR = "error"
 
         private const val NOTIFICATION_ID = 1
@@ -63,6 +64,7 @@ class ProcessingService : Service() {
     private var currentJobState: JobState? = null
     private var jobStartTime: Long = 0
     private var lastProgressUpdate: Long = 0
+    private var currentSegmentIndex = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -87,11 +89,11 @@ class ProcessingService : Service() {
 
     private fun handleStartProcessing(intent: Intent) {
         val inputUri = intent.getParcelableExtra<Uri>(EXTRA_INPUT_URI)
-        val outputUri = intent.getParcelableExtra<Uri>(EXTRA_OUTPUT_URI)
+        val outputFolderUri = intent.getParcelableExtra<Uri>(EXTRA_OUTPUT_FOLDER_URI)
         val jobId = intent.getStringExtra(EXTRA_JOB_ID) ?: UUID.randomUUID().toString()
 
-        if (inputUri == null || outputUri == null) {
-            sendErrorBroadcast("Missing input or output URI")
+        if (inputUri == null || outputFolderUri == null) {
+            sendErrorBroadcast("Missing input or output folder URI")
             stopSelf()
             return
         }
@@ -100,20 +102,13 @@ class ProcessingService : Service() {
         Thread {
             try {
                 val metadata = metadataReader.read(inputUri)
-                val (mode, command) = FfmpegCommandBuilder.buildArguments(
-                    inputPath = "", // Will be set in ProcessingManager
-                    outputPath = "",
-                    plan = SegmentSelector.select(metadata.durationSeconds),
-                    sourceWidth = metadata.width,
-                    sourceHeight = metadata.height,
-                    rotationDegrees = metadata.rotationDegrees,
-                    hasAudio = metadata.hasAudio
-                )
+                val plan = SegmentSelector.select(metadata.durationSeconds)
 
                 jobStartTime = System.currentTimeMillis()
                 lastProgressUpdate = jobStartTime
+                currentSegmentIndex = 0
 
-                currentJobState = JobState.createInitial(jobId, inputUri, outputUri, metadata, mode)
+                currentJobState = JobState.createInitial(jobId, inputUri, outputFolderUri, metadata)
 
                 // Show initial notification
                 showNotification(currentJobState!!)
@@ -121,9 +116,9 @@ class ProcessingService : Service() {
                 // Start processing on worker thread
                 processingManager.start(
                     inputUri,
-                    outputUri,
+                    outputFolderUri,
                     metadata,
-                    SegmentSelector.select(metadata.durationSeconds),
+                    plan,
                     object : ProcessingManager.Listener {
                         override fun onProgress(percent: Int, status: String) {
                             val now = System.currentTimeMillis()
@@ -138,20 +133,30 @@ class ProcessingService : Service() {
                                 lastProgressUpdate = now
                                 showNotification(currentJobState!!)
                             }
-                            sendProgressBroadcast(percent, status, etaMillis, mode)
+                            sendProgressBroadcast(percent, status, etaMillis)
                         }
 
-                        override fun onSuccess(outputUri: Uri) {
+                        override fun onSegmentComplete(segmentIndex: Int, outputUri: Uri) {
+                            currentSegmentIndex = segmentIndex
                             currentJobState = currentJobState?.copy(
-                                progressPercent = 100,
-                                status = "Completed",
-                                etaMillis = 0,
-                                isProcessing = false,
-                                isCompleted = true,
-                                outputDisplayName = getDisplayName(outputUri)
+                                outputFileNames = currentJobState!!.outputFileNames.mapIndexed { i, name ->
+                                    if (i == segmentIndex) "$name ✓" else name
+                                }
                             )
                             showNotification(currentJobState!!)
-                            sendCompletedBroadcast(outputUri, mode)
+                            sendSegmentCompleteBroadcast(segmentIndex, outputUri)
+                        }
+
+                        override fun onAllComplete(outputUris: List<Uri>) {
+                            currentJobState = currentJobState?.copy(
+                                progressPercent = 100,
+                                status = "All 4 segments complete",
+                                etaMillis = 0,
+                                isProcessing = false,
+                                isCompleted = true
+                            )
+                            showNotification(currentJobState!!)
+                            sendCompletedBroadcast(outputUris)
                             stopForeground(true)
                             stopSelf()
                         }
@@ -205,20 +210,26 @@ class ProcessingService : Service() {
         return if (remaining > 0L) remaining else 0L
     }
 
-    private fun sendProgressBroadcast(percent: Int, status: String, etaMillis: Long?, mode: FfmpegCommandBuilder.Mode) {
+    private fun sendProgressBroadcast(percent: Int, status: String, etaMillis: Long?) {
         val intent = Intent(BROADCAST_PROGRESS).apply {
             putExtra(EXTRA_PROGRESS, percent)
             putExtra(EXTRA_STATUS, status)
             etaMillis?.let { putExtra(EXTRA_ETA_MILLIS, it) }
-            putExtra(EXTRA_MODE, mode.name)
         }
         sendBroadcast(intent)
     }
 
-    private fun sendCompletedBroadcast(outputUri: Uri, mode: FfmpegCommandBuilder.Mode) {
+    private fun sendSegmentCompleteBroadcast(segmentIndex: Int, outputUri: Uri) {
+        val intent = Intent(BROADCAST_SEGMENT_COMPLETE).apply {
+            putExtra(EXTRA_SEGMENT_INDEX, segmentIndex)
+            putExtra(EXTRA_OUTPUT_URIS, outputUri)
+        }
+        sendBroadcast(intent)
+    }
+
+    private fun sendCompletedBroadcast(outputUris: List<Uri>) {
         val intent = Intent(BROADCAST_COMPLETED).apply {
-            putExtra(EXTRA_OUTPUT_URI, outputUri)
-            putExtra(EXTRA_MODE, mode.name)
+            putExtra(EXTRA_OUTPUT_URIS, outputUris)
         }
         sendBroadcast(intent)
     }
@@ -278,16 +289,10 @@ class ProcessingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val modeLabel = when (state.mode) {
-            FfmpegCommandBuilder.Mode.STREAM_COPY -> "Stream Copy"
-            FfmpegCommandBuilder.Mode.BICUBIC_REENCODE -> "Bicubic 720p"
-        }
-
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle("Shoo Cut")
             .setContentText("$progress% • ${state.status}")
-            .setSubText(modeLabel)
             .setOngoing(state.isProcessing)
             .setPriority(if (state.isProcessing) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_DEFAULT)
             .setProgress(100, progress, isIndeterminate)
@@ -314,7 +319,7 @@ class ProcessingService : Service() {
         } else if (state.isProcessing) {
             style.bigText("${state.status}\nEstimating…")
         } else if (state.isCompleted) {
-            style.bigText("Video processing completed")
+            style.bigText("All 4 segments complete")
             builder.setContentText("Completed")
         } else if (state.isCancelled) {
             style.bigText("Processing cancelled")
@@ -329,22 +334,6 @@ class ProcessingService : Service() {
             startForeground(NOTIFICATION_ID, builder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(NOTIFICATION_ID, builder.build())
-        }
-    }
-
-    private fun getDisplayName(uri: Uri): String? {
-        return try {
-            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
-                ?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                        if (index >= 0 && !cursor.isNull(index)) {
-                            cursor.getString(index)
-                        } else null
-                    } else null
-                }
-        } catch (_: Exception) {
-            uri.lastPathSegment
         }
     }
 

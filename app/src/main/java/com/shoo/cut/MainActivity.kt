@@ -29,8 +29,8 @@ class MainActivity : AppCompatActivity() {
     private val metadataExecutor = Executors.newSingleThreadExecutor()
 
     private var inputUri: Uri? = null
-    private var outputUri: Uri? = null
-    private var lastResultUri: Uri? = null
+    private var outputFolderUri: Uri? = null
+    private var lastResultUris: List<Uri> = emptyList()
     private var metadata: VideoMetadata? = null
     private var plan: SegmentPlan? = null
     private var pendingStart = false
@@ -41,19 +41,9 @@ class MainActivity : AppCompatActivity() {
             if (uri != null) handlePickedVideo(uri)
         }
 
-    private val createOutputLauncher =
-        registerForActivityResult(
-            ActivityResultContracts.CreateDocument(VideoPicker.MP4_MIME_TYPE)
-        ) { uri ->
-            if (uri != null) {
-                handleOutputChosen(uri)
-                if (pendingStart) {
-                    pendingStart = false
-                    startProcessing()
-                }
-            } else {
-                pendingStart = false
-            }
+    private val pickOutputFolderLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) handleOutputFolderChosen(uri)
         }
 
     // Broadcast receiver for service updates
@@ -61,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 ProcessingService.BROADCAST_PROGRESS -> onProgressUpdate(intent)
+                ProcessingService.BROADCAST_SEGMENT_COMPLETE -> onSegmentComplete(intent)
                 ProcessingService.BROADCAST_COMPLETED -> onProcessingCompleted(intent)
                 ProcessingService.BROADCAST_ERROR -> onProcessingError(intent)
                 ProcessingService.BROADCAST_CANCELLED -> onProcessingCancelled()
@@ -89,14 +80,20 @@ class MainActivity : AppCompatActivity() {
                 pickVideoLauncher.launch(arrayOf(VideoPicker.VIDEO_MIME_TYPE))
             }
         }
+        binding.buttonSelectFolder.setOnClickListener {
+            if (!isProcessing()) {
+                pickOutputFolderLauncher.launch()
+            }
+        }
         binding.buttonStart.setOnClickListener { onStartClicked() }
         binding.buttonCancel.setOnClickListener { cancelProcessing() }
-        binding.buttonOpenOutput.setOnClickListener { openOutput() }
+        binding.buttonOpenOutput.setOnClickListener { openOutputFolder() }
     }
 
     private fun registerReceivers() {
         val filter = IntentFilter().apply {
             addAction(ProcessingService.BROADCAST_PROGRESS)
+            addAction(ProcessingService.BROADCAST_SEGMENT_COMPLETE)
             addAction(ProcessingService.BROADCAST_COMPLETED)
             addAction(ProcessingService.BROADCAST_ERROR)
             addAction(ProcessingService.BROADCAST_CANCELLED)
@@ -157,7 +154,7 @@ class MainActivity : AppCompatActivity() {
             binding.textFileName.text = getString(R.string.no_video_selected)
             binding.textFileDetails.text = getString(R.string.no_video_details)
             binding.textSegmentInfo.text = ""
-            binding.textOutputSpecs.text = ""
+            binding.textOutputFolder.text = getString(R.string.output_folder_not_selected)
             binding.buttonStart.isEnabled = false
             binding.buttonCancel.visibility = View.GONE
             binding.buttonOpenOutput.visibility = View.GONE
@@ -168,7 +165,7 @@ class MainActivity : AppCompatActivity() {
             binding.textEta.visibility = View.GONE
             binding.textEta.text = ""
             binding.textCompleted.visibility = View.GONE
-            binding.textOutputLocation.text = getString(R.string.output_not_set)
+            binding.textOutputFiles.visibility = View.GONE
         }
     }
 
@@ -183,8 +180,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         inputUri = uri
-        outputUri = null
-        lastResultUri = null
+        outputFolderUri = null
+        lastResultUris = emptyList()
         metadata = null
         plan = null
 
@@ -192,8 +189,7 @@ class MainActivity : AppCompatActivity() {
             binding.textFileName.text = uri.lastPathSegment ?: getString(R.string.no_video_selected)
             binding.textFileDetails.text = getString(R.string.reading_video)
             binding.textSegmentInfo.text = ""
-            binding.textOutputSpecs.text = ""
-            binding.textOutputLocation.text = getString(R.string.output_not_set)
+            binding.textOutputFolder.text = getString(R.string.output_folder_not_selected)
             binding.buttonStart.isEnabled = false
             binding.buttonOpenOutput.visibility = View.GONE
             binding.textCompleted.visibility = View.GONE
@@ -241,7 +237,6 @@ class MainActivity : AppCompatActivity() {
             try {
                 val selected = SegmentSelector.select(info.durationSeconds)
                 plan = selected
-                // textRetainedEstimate removed from layout - info shown in file details instead
                 binding.textSegmentInfo.text = resources.getQuantityString(
                     R.plurals.segment_count,
                     selected.segments.size,
@@ -255,6 +250,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleOutputFolderChosen(uri: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (_: Exception) {
+            // The tree grant is valid for this session regardless.
+        }
+        outputFolderUri = uri
+        runOnUiThread {
+            binding.textOutputFolder.text = getString(R.string.output_folder_selected, displayNameOf(uri))
+            binding.buttonStart.isEnabled = metadata != null
+        }
+    }
+
     private fun onStartClicked() {
         val info = metadata
         if (info == null) {
@@ -262,18 +273,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (outputUri == null) {
-            pendingStart = true
-            createOutputLauncher.launch(VideoPicker.buildOutputFileName(info.displayName))
+        if (outputFolderUri == null) {
+            Toast.makeText(this, R.string.select_folder_first, Toast.LENGTH_SHORT).show()
             return
         }
+
         startProcessing()
     }
 
     private fun startProcessing() {
         val info = metadata ?: return
         val source = inputUri ?: return
-        val destination = outputUri ?: return
+        val destination = outputFolderUri ?: return
         val selectedPlan = plan ?: try {
             SegmentSelector.select(info.durationSeconds).also { plan = it }
         } catch (e: Exception) {
@@ -290,17 +301,19 @@ class MainActivity : AppCompatActivity() {
             binding.textCompleted.visibility = View.GONE
             binding.buttonStart.isEnabled = false
             binding.buttonSelectVideo.isEnabled = false
+            binding.buttonSelectFolder.isEnabled = false
             binding.buttonCancel.isEnabled = true
             binding.buttonCancel.visibility = View.VISIBLE
             binding.buttonOpenOutput.visibility = View.GONE
             binding.cardProcessing.visibility = View.VISIBLE
+            binding.textOutputFiles.visibility = View.GONE
         }
 
         val jobId = java.util.UUID.randomUUID().toString()
         val intent = Intent(this, ProcessingService::class.java).apply {
             action = ProcessingService.ACTION_START
             putExtra(ProcessingService.EXTRA_INPUT_URI, source)
-            putExtra(ProcessingService.EXTRA_OUTPUT_URI, destination)
+            putExtra(ProcessingService.EXTRA_OUTPUT_FOLDER_URI, destination)
             putExtra(ProcessingService.EXTRA_JOB_ID, jobId)
         }
         ContextCompat.startForegroundService(this, intent)
@@ -317,7 +330,6 @@ class MainActivity : AppCompatActivity() {
         val percent = intent.getIntExtra(ProcessingService.EXTRA_PROGRESS, 0)
         val status = intent.getStringExtra(ProcessingService.EXTRA_STATUS) ?: ""
         val etaMillis = intent.getLongExtra(ProcessingService.EXTRA_ETA_MILLIS, -1)
-        val modeName = intent.getStringExtra(ProcessingService.EXTRA_MODE) ?: ""
 
         runOnUiThread {
             binding.progressBar.progress = percent
@@ -327,18 +339,18 @@ class MainActivity : AppCompatActivity() {
                 binding.textEta.visibility = View.VISIBLE
                 binding.textEta.text = formatEta(etaMillis)
             }
-            // Update output specs with mode
-            val modeLabel = when (modeName) {
-                "STREAM_COPY" -> getString(R.string.processing_mode_stream_copy)
-                else -> getString(R.string.processing_mode_bicubic)
-            }
-            binding.textOutputSpecs.text = getString(R.string.output_specs, modeLabel)
         }
     }
 
+    private fun onSegmentComplete(intent: Intent) {
+        val segmentIndex = intent.getIntExtra(ProcessingService.EXTRA_SEGMENT_INDEX, -1)
+        val outputUri = intent.getParcelableExtra<Uri>(ProcessingService.EXTRA_OUTPUT_URIS)
+        outputUri?.let { lastResultUris = lastResultUris + it }
+    }
+
     private fun onProcessingCompleted(intent: Intent) {
-        val outputUri = intent.getParcelableExtra<Uri>(ProcessingService.EXTRA_OUTPUT_URI)
-        val modeName = intent.getStringExtra(ProcessingService.EXTRA_MODE) ?: ""
+        val outputUris = intent.getParcelableArrayListExtra<Uri>(ProcessingService.EXTRA_OUTPUT_URIS) ?: emptyList()
+        lastResultUris = outputUris
 
         runOnUiThread {
             finishProcessingUi()
@@ -348,12 +360,11 @@ class MainActivity : AppCompatActivity() {
             binding.textEta.visibility = View.GONE
             binding.textCompleted.visibility = View.VISIBLE
             binding.textCompleted.text = getString(R.string.completed_message)
-            if (outputUri != null) {
-                binding.textOutputLocation.text =
-                    getString(R.string.output_saved, displayNameOf(outputUri))
-                this@MainActivity.lastResultUri = outputUri
-            }
-            this@MainActivity.outputUri = null
+
+            val fileNames = outputUris.map { displayNameOf(it) }.joinToString("\n")
+            binding.textOutputFiles.text = getString(R.string.output_files_saved, fileNames)
+            binding.textOutputFiles.visibility = View.VISIBLE
+
             binding.buttonOpenOutput.visibility = View.VISIBLE
             Toast.makeText(this@MainActivity, R.string.toast_completed, Toast.LENGTH_LONG).show()
         }
@@ -389,8 +400,7 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             // Restore input/output URIs if available
             state.inputUri?.let { inputUri = it }
-            state.outputUri?.let { outputUri = it }
-            lastResultUri = state.outputUri
+            state.outputFolderUri?.let { outputFolderUri = it }
 
             // Restore metadata display
             if (state.inputDisplayName != null) {
@@ -408,12 +418,6 @@ class MainActivity : AppCompatActivity() {
                 4
             )
 
-            val modeLabel = when (state.mode) {
-                FfmpegCommandBuilder.Mode.STREAM_COPY -> getString(R.string.processing_mode_stream_copy)
-                else -> getString(R.string.processing_mode_bicubic)
-            }
-            binding.textOutputSpecs.text = getString(R.string.output_specs, modeLabel)
-
             // Restore progress UI
             if (state.isProcessing) {
                 binding.progressBar.progress = state.progressPercent
@@ -421,6 +425,7 @@ class MainActivity : AppCompatActivity() {
                 binding.textStatus.text = state.status
                 binding.buttonStart.isEnabled = false
                 binding.buttonSelectVideo.isEnabled = false
+                binding.buttonSelectFolder.isEnabled = false
                 binding.buttonCancel.visibility = View.VISIBLE
                 binding.buttonOpenOutput.visibility = View.GONE
                 binding.cardProcessing.visibility = View.VISIBLE
@@ -437,9 +442,7 @@ class MainActivity : AppCompatActivity() {
                 binding.textStatus.text = getString(R.string.status_completed)
                 binding.textCompleted.visibility = View.VISIBLE
                 binding.textCompleted.text = getString(R.string.completed_message)
-                state.outputDisplayName?.let { name ->
-                    binding.textOutputLocation.text = getString(R.string.output_saved, name)
-                }
+                binding.textOutputFiles.visibility = View.VISIBLE
                 binding.buttonOpenOutput.visibility = View.VISIBLE
             } else if (state.isCancelled) {
                 finishProcessingUi()
@@ -454,30 +457,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun finishProcessingUi() {
-        binding.buttonStart.isEnabled = metadata != null
+        binding.buttonStart.isEnabled = metadata != null && outputFolderUri != null
         binding.buttonSelectVideo.isEnabled = true
+        binding.buttonSelectFolder.isEnabled = true
         binding.buttonCancel.visibility = View.GONE
         binding.cardProcessing.visibility = View.GONE
         binding.textEta.visibility = View.GONE
     }
 
-    private fun handleOutputChosen(uri: Uri) {
-        try {
-            contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-        } catch (_: Exception) {
-            // The CREATE_DOCUMENT grant is valid for this session regardless.
-        }
-        outputUri = uri
-        runOnUiThread {
-            binding.textOutputLocation.text = getString(R.string.output_selected, displayNameOf(uri))
-        }
-    }
-
-    private fun openOutput() {
-        val uri = lastResultUri ?: return
+    private fun openOutputFolder() {
+        // Open the first output file as a representative
+        val uri = lastResultUris.firstOrNull() ?: return
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, VideoPicker.MP4_MIME_TYPE)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

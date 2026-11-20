@@ -3,7 +3,6 @@ package com.shoo.cut
 import android.net.Uri
 import android.os.Parcel
 import android.os.Parcelable
-import java.io.Serializable
 
 /**
  * Persistent state of a processing job, used to restore UI when Activity is recreated
@@ -12,14 +11,13 @@ import java.io.Serializable
 data class JobState(
     val jobId: String,
     val inputUriString: String?,
-    val outputUriString: String?,
+    val outputFolderUriString: String?,
     val inputDisplayName: String?,
-    val outputDisplayName: String?,
+    val outputFileNames: List<String>,
     val durationSeconds: Double,
     val width: Int,
     val height: Int,
     val hasAudio: Boolean,
-    val mode: FfmpegCommandBuilder.Mode,
     val progressPercent: Int,
     val status: String,
     val etaMillis: Long?,
@@ -33,14 +31,13 @@ data class JobState(
     constructor(parcel: Parcel) : this(
         jobId = parcel.readString() ?: "",
         inputUriString = parcel.readString(),
-        outputUriString = parcel.readString(),
+        outputFolderUriString = parcel.readString(),
         inputDisplayName = parcel.readString(),
-        outputDisplayName = parcel.readString(),
+        outputFileNames = parcel.createStringArrayList() ?: emptyList(),
         durationSeconds = parcel.readDouble(),
         width = parcel.readInt(),
         height = parcel.readInt(),
         hasAudio = parcel.readInt() == 1,
-        mode = FfmpegCommandBuilder.Mode.valueOf(parcel.readString() ?: "BICUBIC_REENCODE"),
         progressPercent = parcel.readInt(),
         status = parcel.readString() ?: "",
         etaMillis = if (parcel.readInt() == 1) parcel.readLong() else null,
@@ -54,14 +51,13 @@ data class JobState(
     override fun writeToParcel(parcel: Parcel, flags: Int) {
         parcel.writeString(jobId)
         parcel.writeString(inputUriString)
-        parcel.writeString(outputUriString)
+        parcel.writeString(outputFolderUriString)
         parcel.writeString(inputDisplayName)
-        parcel.writeString(outputDisplayName)
+        parcel.writeStringList(outputFileNames)
         parcel.writeDouble(durationSeconds)
         parcel.writeInt(width)
         parcel.writeInt(height)
         parcel.writeInt(if (hasAudio) 1 else 0)
-        parcel.writeString(mode.name)
         parcel.writeInt(progressPercent)
         parcel.writeString(status)
         if (etaMillis != null) {
@@ -89,21 +85,20 @@ data class JobState(
         fun createInitial(
             jobId: String,
             inputUri: Uri,
-            outputUri: Uri,
-            metadata: VideoMetadata,
-            mode: FfmpegCommandBuilder.Mode
+            outputFolderUri: Uri,
+            metadata: VideoMetadata
         ): JobState {
+            val fileNames = (1..4).map { "${metadata.displayName.substringBeforeLast('.', metadata.displayName).ifBlank { "shoo_cut" }}_$it.mp4" }
             return JobState(
                 jobId = jobId,
                 inputUriString = inputUri.toString(),
-                outputUriString = outputUri.toString(),
+                outputFolderUriString = outputFolderUri.toString(),
                 inputDisplayName = metadata.displayName,
-                outputDisplayName = null,
+                outputFileNames = fileNames,
                 durationSeconds = metadata.durationSeconds,
                 width = metadata.width,
                 height = metadata.height,
                 hasAudio = metadata.hasAudio,
-                mode = mode,
                 progressPercent = 0,
                 status = "Starting…",
                 etaMillis = null,
@@ -117,5 +112,5 @@ data class JobState(
     }
 
     val inputUri: Uri? = inputUriString?.let { Uri.parse(it) }
-    val outputUri: Uri? = outputUriString?.let { Uri.parse(it) }
+    val outputFolderUri: Uri? = outputFolderUriString?.let { Uri.parse(it) }
 }

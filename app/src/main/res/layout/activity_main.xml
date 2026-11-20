@@ -92,6 +92,57 @@
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 
+        <!-- Output Folder Card -->
+        <androidx.cardview.widget.CardView
+            android:id="@+id/cardOutputFolder"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:background="@color/card_background"
+            app:cardElevation="0dp"
+            app:cardCornerRadius="12dp"
+            app:cardBackgroundColor="@color/card_background"
+            app:strokeColor="@color/card_border"
+            app:strokeWidth="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Output Folder"
+                    android:textSize="12sp"
+                    android:textColor="@color/text_tertiary"
+                    android:textAllCaps="true"
+                    android:letterSpacing="0.05" />
+
+                <Button
+                    android:id="@+id/buttonSelectFolder"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/select_output_folder"
+                    android:textSize="14sp"
+                    android:textAllCaps="false"
+                    android:backgroundTint="@color/primary_light"
+                    android:textColor="@color/primary"
+                    app:cornerRadius="8dp" />
+
+                <TextView
+                    android:id="@+id/textOutputFolder"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/output_folder_not_selected"
+                    android:textSize="13sp"
+                    android:textColor="@color/text_secondary" />
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
         <!-- Processing Config Card -->
         <androidx.cardview.widget.CardView
             android:id="@+id/cardProcessingConfig"
@@ -140,7 +191,7 @@
                         android:id="@+id/textOutputSpecs"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="@string/output_specs"
+                        android:text="@string/output_specs_stream_copy"
                         android:textSize="13sp"
                         android:textColor="@color/text_secondary" />
                 </LinearLayout>
@@ -303,14 +354,14 @@
             android:visibility="gone" />
 
         <TextView
-            android:id="@+id/textOutputLocation"
+            android:id="@+id/textOutputFiles"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="@string/output_not_set"
+            android:text=""
             android:textSize="12sp"
             android:textColor="@color/text_tertiary"
-            android:gravity="center" />
-
+            android:gravity="center"
+            android:visibility="gone" />
     </LinearLayout>
 </ScrollView>

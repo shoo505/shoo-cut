@@ -9,17 +9,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Orchestrates the smart processing pipeline with automatic mode selection:
+ * Orchestrates the 4-segment stream-copy pipeline.
  *
- * 1. STREAM COPY: When input is already 1280x720 with no rotation.
- *    Uses `-c copy` for fast, lossless processing.
- * 2. BICUBIC RE-ENCODE: When scaling/rotation is needed.
- *    Uses libopenh264 with bicubic scaling.
- * 3. AUTOMATIC FALLBACK: If stream copy fails, automatically retries
- *    with bicubic re-encode.
+ * Processes each of the 4 quarters sequentially:
+ * 1. Copy input URI to local temp file (if needed)
+ * 2. For each segment: run FFmpeg stream copy to a temp output file
+ * 3. Write each temp output to the SAF destination folder
+ * 3. Clean up temp files
  *
- * Processes 4 segments sequentially to minimize Android memory pressure.
- * All callbacks are delivered on the main thread.
+ * No re-encoding, no fallback. Stream copy only.
  */
 class ProcessingManager(
     private val storage: StorageManager,
@@ -28,7 +26,8 @@ class ProcessingManager(
 
     interface Listener {
         fun onProgress(percent: Int, status: String)
-        fun onSuccess(outputUri: Uri)
+        fun onSegmentComplete(segmentIndex: Int, outputUri: Uri)
+        fun onAllComplete(outputUris: List<Uri>)
         fun onError(message: String)
         fun onCancelled()
     }
@@ -46,14 +45,14 @@ class ProcessingManager(
 
     @Volatile private var lastPercent = 0
     @Volatile private var tempInput: File? = null
-    @Volatile private var tempOutput: File? = null
+    @Volatile private var tempSegmentFiles: MutableList<File> = mutableListOf()
     @Volatile private var listener: Listener? = null
 
     fun isProcessing(): Boolean = running.get()
 
     fun start(
         inputUri: Uri,
-        outputUri: Uri,
+        outputFolderUri: Uri,
         metadata: VideoMetadata,
         plan: SegmentPlan,
         listener: Listener
@@ -66,7 +65,7 @@ class ProcessingManager(
         finished.set(false)
         lastPercent = 0
         tempInput = null
-        tempOutput = null
+        tempSegmentFiles.clear()
         this.listener = listener
 
         worker.execute {
@@ -80,13 +79,13 @@ class ProcessingManager(
                     )
                 }
 
-                postProgress(3, "Copying video into working storage…")
+                postProgress(3, "Preparing input video…")
                 val input = storage.createTempInputFile()
                 tempInput = input
                 storage.copyUriToFile(inputUri, input) { copied ->
                     if (metadata.sizeBytes > 0L && !cancelled.get()) {
                         val copiedPercent = (copied * 100L / metadata.sizeBytes).toInt().coerceIn(0, 100)
-                        val percent = 3 + copiedPercent * 5 / 100
+                        val percent = 3 + copiedPercent * 7 / 100
                         postProgress(percent, "Copying video… ${formatFileSize(copied)}")
                     }
                 }
@@ -95,42 +94,79 @@ class ProcessingManager(
                     return@execute
                 }
 
-                postProgress(9, "Preparing FFmpeg…")
-                val output = storage.createTempOutputFile()
-                tempOutput = output
+                postProgress(10, "Starting segment processing…")
 
-                // Determine initial processing mode
-                val (initialMode, command) = FfmpegCommandBuilder.buildArguments(
-                    inputPath = input.absolutePath,
-                    outputPath = output.absolutePath,
-                    plan = plan,
-                    sourceWidth = metadata.width,
-                    sourceHeight = metadata.height,
-                    rotationDegrees = metadata.rotationDegrees,
-                    hasAudio = metadata.hasAudio
-                )
+                val outputUris = mutableListOf<Uri>()
+                val totalSegments = plan.segments.size
 
-                // Execute with automatic fallback
-                val finalMode = executeWithFallback(
-                    command = command,
-                    initialMode = initialMode,
-                    input = input,
-                    output = output,
-                    plan = plan,
-                    metadata = metadata
-                )
+                for ((segmentIndex, segment) in plan.segments.withIndex()) {
+                    if (cancelled.get()) {
+                        finishCancelled()
+                        return@execute
+                    }
 
-                if (cancelled.get() || processor.wasCancelled()) {
+                    val segmentNumber = segmentIndex + 1
+                    val segmentPercentStart = 10 + (segmentIndex * 85 / totalSegments)
+                    val segmentPercentEnd = 10 + ((segmentIndex + 1) * 85 / totalSegments)
+
+                    postProgress(segmentPercentStart, "Processing segment $segmentNumber/$totalSegments…")
+
+                    val segmentOutput = storage.createTempOutputFile()
+                    tempSegmentFiles.add(segmentOutput)
+
+                    val command = FfmpegCommandBuilder.buildSegmentCommand(
+                        inputPath = input.absolutePath,
+                        outputPath = segmentOutput.absolutePath,
+                        startSeconds = segment.startSeconds,
+                        durationSeconds = segment.durationSeconds,
+                        hasAudio = metadata.hasAudio
+                    )
+
+                    val commandString = command.joinToString(" ") { FfmpegCommandBuilder.quote(it) }
+                    val segmentDurationMillis = (segment.durationSeconds * 1000.0).coerceAtLeast(1.0)
+
+                    val exitCode = processor.run(commandString) { currentMillis ->
+                        if (!cancelled.get()) {
+                            val segmentProgress = (currentMillis * 100.0 / segmentDurationMillis).toInt().coerceIn(0, 100)
+                            val overallPercent = segmentPercentStart + (segmentProgress * (segmentPercentEnd - segmentPercentStart) / 100)
+                            postProgress(overallPercent, "Segment $segmentNumber/$totalSegments… $segmentProgress%")
+                        }
+                    }
+
+                    if (cancelled.get() || processor.wasCancelled()) {
+                        finishCancelled()
+                        return@execute
+                    }
+                    if (exitCode != 0) {
+                        val diagnostics = processor.diagnostics()
+                        if (diagnostics.isNotEmpty()) {
+                            Log.w(TAG, "FFmpeg failed for segment $segmentNumber:\n$diagnostics")
+                        }
+                        throw IllegalStateException(
+                            "Stream copy failed for segment $segmentNumber (${VideoProcessor.describeReturnCode(exitCode)})."
+                        )
+                    }
+                    if (!segmentOutput.isFile || segmentOutput.length() <= 0L) {
+                        throw IllegalStateException("FFmpeg produced no output for segment $segmentNumber.")
+                    }
+
+                    // Write segment to SAF folder
+                    val outputFileName = buildOutputFileName(metadata.displayName, segmentNumber)
+                    val segmentUri = storage.writeFileToFolder(outputFolderUri, segmentOutput, outputFileName)
+                    outputUris.add(segmentUri)
+
+                    postProgress(segmentPercentEnd, "Segment $segmentNumber/$totalSegments saved")
+                    listener?.onSegmentComplete(segmentIndex, segmentUri)
+                }
+
+                if (cancelled.get()) {
                     finishCancelled()
                     return@execute
                 }
-                if (!output.isFile || output.length() <= 0L) {
-                    throw IllegalStateException("FFmpeg produced no output.")
-                }
 
-                postProgress(96, "Saving to the selected location…")
-                storage.writeFileToUri(output, outputUri)
-                finishSuccess(outputUri, finalMode)
+                postProgress(96, "Finalizing…")
+                postProgress(100, "All 4 segments complete")
+                finishSuccess(outputUris)
             } catch (e: Exception) {
                 if (cancelled.get() && e !is StorageException) {
                     finishCancelled()
@@ -141,105 +177,16 @@ class ProcessingManager(
         }
     }
 
-    /**
-     * Executes FFmpeg command with automatic fallback from stream copy to re-encode.
-     * Returns the mode that actually succeeded.
-     */
-    private fun executeWithFallback(
-        command: List<String>,
-        initialMode: FfmpegCommandBuilder.Mode,
-        input: File,
-        output: File,
-        plan: SegmentPlan,
-        metadata: VideoMetadata
-    ): FfmpegCommandBuilder.Mode {
-        var currentMode = initialMode
-        var currentCommand = command
-
-        // Try initial mode
-        val exitCode = runCommand(currentCommand, plan, currentMode)
-
-        // If stream copy failed and we haven't tried re-encode yet, fall back
-        if (exitCode != 0 && currentMode == FfmpegCommandBuilder.Mode.STREAM_COPY) {
-            if (!cancelled.get() && !processor.wasCancelled()) {
-                val diagnostics = processor.diagnostics()
-                if (diagnostics.isNotEmpty()) {
-                    Log.w(TAG, "Stream copy failed, falling back to bicubic re-encode:\n$diagnostics")
-                }
-                postProgress(10, "Stream copy failed, falling back to re-encode…")
-
-                // Clean up failed output
-                storage.deleteQuietly(output)
-                val newOutput = storage.createTempOutputFile()
-                tempOutput = newOutput
-
-                // Build re-encode command
-                val (_, reencodeCommand) = FfmpegCommandBuilder.buildArguments(
-                    inputPath = input.absolutePath,
-                    outputPath = newOutput.absolutePath,
-                    plan = plan,
-                    sourceWidth = metadata.width,
-                    sourceHeight = metadata.height,
-                    rotationDegrees = metadata.rotationDegrees,
-                    hasAudio = metadata.hasAudio
-                )
-
-                currentMode = FfmpegCommandBuilder.Mode.BICUBIC_REENCODE
-                currentCommand = reencodeCommand
-
-                // Retry with re-encode
-                val retryExitCode = runCommand(currentCommand, plan, currentMode)
-
-                if (retryExitCode != 0) {
-                    val retryDiagnostics = processor.diagnostics()
-                    if (retryDiagnostics.isNotEmpty()) {
-                        Log.w(TAG, "Re-encode fallback also failed:\n$retryDiagnostics")
-                    }
-                    throw IllegalStateException(
-                        "Video processing failed (${VideoProcessor.describeReturnCode(retryExitCode)})."
-                    )
-                }
-            }
-        } else if (exitCode != 0) {
-            val diagnostics = processor.diagnostics()
-            if (diagnostics.isNotEmpty()) {
-                Log.w(TAG, "FFmpeg failed:\n$diagnostics")
-            }
-            throw IllegalStateException(
-                "Video processing failed (${VideoProcessor.describeReturnCode(exitCode)})."
-            )
-        }
-
-        return currentMode
+    private fun buildOutputFileName(sourceDisplayName: String, segmentNumber: Int): String {
+        val stem = sourceDisplayName
+            .substringBeforeLast('.', sourceDisplayName)
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .trim('_', '.', '-')
+            .ifBlank { "shoo_cut" }
+        return "${stem}_$segmentNumber.mp4"
     }
 
-    /**
-     * Runs a single FFmpeg command with progress reporting.
-     */
-    private fun runCommand(
-        command: List<String>,
-        plan: SegmentPlan,
-        mode: FfmpegCommandBuilder.Mode
-    ): Int {
-        val commandString = command.joinToString(" ") { FfmpegCommandBuilder.quote(it) }
-        val modeName = when (mode) {
-            FfmpegCommandBuilder.Mode.STREAM_COPY -> "Stream copy"
-            FfmpegCommandBuilder.Mode.BICUBIC_REENCODE -> "Bicubic re-encode"
-        }
-        postProgress(10, "$modeName ${plan.segments.size} segment(s)…")
-
-        val totalMillis = (plan.actualRetainedSeconds * 1000.0).coerceAtLeast(1.0)
-        return processor.run(commandString) { currentMillis ->
-            if (!cancelled.get()) {
-                val percent = (10.0 + 85.0 * currentMillis / totalMillis)
-                    .toInt()
-                    .coerceIn(10, 95)
-                postProgress(percent, "$modeName… $percent%")
-            }
-        }
-    }
-
-    /** Best-effort cancellation; always ends with [Listener.onCancelled]. */
+    /** Requests cancellation of the current job. */
     fun cancel() {
         if (!running.get() || finished.get()) return
         cancelled.set(true)
@@ -253,7 +200,7 @@ class ProcessingManager(
         }, CANCEL_GRACE_MS)
     }
 
-    /** Stops the worker once the Activity is going away. */
+    /** Stops the worker once the service is going away. */
     fun shutdown() {
         cancel()
         worker.shutdownNow()
@@ -270,16 +217,7 @@ class ProcessingManager(
         }
     }
 
-    private fun finishSuccess(outputUri: Uri, mode: FfmpegCommandBuilder.Mode) {
-        val modeName = when (mode) {
-            FfmpegCommandBuilder.Mode.STREAM_COPY -> " (stream copy)"
-            FfmpegCommandBuilder.Mode.BICUBIC_REENCODE -> " (bicubic 720p)"
-        }
-        finish { it.onSuccess(outputUri) }
-        mainHandler.post {
-            listener?.onProgress(100, "Completed$modeName")
-        }
-    }
+    private fun finishSuccess(outputUris: List<Uri>) = finish { it.onAllComplete(outputUris) }
 
     private fun finishError(message: String) = finish { it.onError(message) }
 
@@ -297,9 +235,9 @@ class ProcessingManager(
 
     private fun cleanupFiles() {
         storage.deleteQuietly(tempInput)
-        storage.deleteQuietly(tempOutput)
+        tempSegmentFiles.forEach { storage.deleteQuietly(it) }
+        tempSegmentFiles.clear()
         tempInput = null
-        tempOutput = null
     }
 
     companion object {
