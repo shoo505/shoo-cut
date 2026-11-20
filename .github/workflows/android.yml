@@ -40,31 +40,26 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
 
-      # --- Install Gradle directly ---
-      - name: Install Gradle
-        run: |
-          GRADLE_VERSION=8.2
-          wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -O /tmp/gradle.zip
-          sudo unzip -q /tmp/gradle.zip -d /opt
-          sudo ln -sf /opt/gradle-${GRADLE_VERSION}/bin/gradle /usr/local/bin/gradle
-          gradle --version
+      # --- Make gradlew executable ---
+      - name: Make gradlew executable
+        run: chmod +x gradlew
 
       # --- Run unit tests ---
       - name: Run unit tests
         run: |
-          gradle testDebugUnitTest --no-daemon
+          ./gradlew testDebugUnitTest --no-daemon
 
       # --- Build debug APK ---
       - name: Build debug APK
         run: |
-          gradle assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon
 
       # --- Upload APK artifact ---
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: shoo-cut-apk
+          name: shoo-cut-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
