@@ -3,6 +3,7 @@ package com.shoo.cut
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -92,7 +93,7 @@ class ProcessingManager(
                 val output = storage.createTempOutputFile()
                 tempOutput = output
 
-                val command = FfmpegCommandBuilder.build(
+                val command = FfmpegCommandBuilder.buildCommand(
                     inputPath = input.absolutePath,
                     outputPath = output.absolutePath,
                     plan = plan,
@@ -103,11 +104,13 @@ class ProcessingManager(
                 )
 
                 postProgress(10, "Encoding ${plan.segments.size} segment(s)…")
-                val exitCode = processor.run(command) { line ->
+                val totalMillis = (plan.actualRetainedSeconds * 1000.0).coerceAtLeast(1.0)
+                val exitCode = processor.run(command) { currentMillis ->
                     if (!cancelled.get()) {
-                        parsePercent(line, plan.actualRetainedSeconds)?.let { percent ->
-                            postProgress(percent, "Encoding… $percent%")
-                        }
+                        val percent = (10.0 + 85.0 * currentMillis / totalMillis)
+                            .toInt()
+                            .coerceIn(10, 95)
+                        postProgress(percent, "Encoding… $percent%")
                     }
                 }
 
@@ -116,7 +119,13 @@ class ProcessingManager(
                     return@execute
                 }
                 if (exitCode != 0) {
-                    throw IllegalStateException("FFmpeg exited with code $exitCode.")
+                    val diagnostics = processor.diagnostics()
+                    if (diagnostics.isNotEmpty()) {
+                        Log.w(TAG, "FFmpeg failed:\n$diagnostics")
+                    }
+                    throw IllegalStateException(
+                        "Video encoding failed (${VideoProcessor.describeReturnCode(exitCode)})."
+                    )
                 }
                 if (!output.isFile || output.length() <= 0L) {
                     throw IllegalStateException("FFmpeg produced no output.")
@@ -191,19 +200,8 @@ class ProcessingManager(
         tempOutput = null
     }
 
-    private fun parsePercent(line: String, totalSeconds: Double): Int? {
-        if (totalSeconds <= 0.0) return null
-        val match = TIME_PATTERN.find(line) ?: return null
-        val hours = match.groupValues[1].toIntOrNull() ?: return null
-        val minutes = match.groupValues[2].toIntOrNull() ?: return null
-        val seconds = match.groupValues[3].toDoubleOrNull() ?: return null
-        val current = hours * 3600.0 + minutes * 60.0 + seconds
-        val percent = (10.0 + 85.0 * (current / totalSeconds)).toInt()
-        return percent.coerceIn(10, 95)
-    }
-
     companion object {
-        private val TIME_PATTERN = Regex("time=(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)")
+        private const val TAG = "ProcessingManager"
         private const val CANCEL_GRACE_MS = 2500L
     }
 }

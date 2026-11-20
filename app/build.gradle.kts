@@ -49,11 +49,6 @@ android {
                 "/META-INF/NOTICE.txt"
             )
         }
-        jniLibs {
-            // The FFmpeg binary in the pao11 AAR is executed as a process, so the
-            // native library must be extracted (and executable) at install time.
-            useLegacyPackaging = true
-        }
     }
 }
 
@@ -63,10 +58,11 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.activity:activity-ktx:1.9.0")
 
-    // Verified on Maven Central: ships libffmpeg.so for arm64-v8a and
-    // armeabi-v7a, built with libx264, the native AAC encoder, bicubic scale,
-    // concat/pad/trim filters. No ffprobe binary is included.
-    implementation("io.github.pao11:ffmpeg-android:1.1.0")
+    // Verified on Maven Central (checksum-verified, contents inspected):
+    // genuine arm64-v8a / armeabi-v7a / x86 / x86_64 FFmpeg 4.4 libraries built
+    // with NDK r25b, including libc++_shared.so, libopenh264, the native AAC
+    // encoder and the concat/trim/pad/scale(bicubic)/setsar/transpose filters.
+    implementation("com.bihe0832.android:lib-ffmpeg-mobile-aaf:8.5.0")
 
     testImplementation("junit:junit:4.13.2")
 }

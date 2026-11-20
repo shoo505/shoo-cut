@@ -10,17 +10,22 @@ import kotlin.math.roundToInt
  * letterboxed canvas and encodes H.264/AAC MP4.
  *
  * The command is pure data (no Android types), so it can be unit tested on the
- * JVM. It targets the bundled FFmpeg 2.4.x binary shipped by the pao11
- * `ffmpeg-android` AAR, which means:
+ * JVM. It targets the FFmpeg 4.4 binary shipped by the verified
+ * `com.bihe0832.android:lib-ffmpeg-mobile-aaf:8.5.0` AAR (MobileFFmpeg build):
  *
- *  - `force_divisible_by` and `-stats_period` are NOT available,
- *  - the native AAC encoder needs `-strict -2`,
- *  - scaling uses literal even output dimensions computed in Kotlin.
+ *  - H.264 comes from `libopenh264`, the only H.264 encoder in that build,
+ *  - AAC is the native FFmpeg encoder,
+ *  - `bicubic`, `pad`, `transpose`, `concat` and `setsar` are available,
+ *  - the bundled binary does **not** autorotate reliably across versions, so
+ *    rotation is applied explicitly and autorotation is disabled.
  */
 object FfmpegCommandBuilder {
 
     const val OUTPUT_WIDTH = 1280
     const val OUTPUT_HEIGHT = 720
+
+    /** Target video bitrate for the 720p H.264 stream. */
+    const val VIDEO_BITRATE = "4M"
 
     /**
      * Returns `[width, height]` of the scaled picture before padding, keeping the
@@ -39,17 +44,22 @@ object FfmpegCommandBuilder {
             OUTPUT_WIDTH.toDouble() / width,
             OUTPUT_HEIGHT.toDouble() / height
         )
-        var scaledWidth = (width * factor).roundToInt()
-        var scaledHeight = (height * factor).roundToInt()
-        scaledWidth = (scaledWidth / 2) * 2
-        scaledHeight = (scaledHeight / 2) * 2
+        val scaledWidth = ((width * factor).roundToInt() / 2) * 2
+        val scaledHeight = ((height * factor).roundToInt() / 2) * 2
         return intArrayOf(
             scaledWidth.coerceIn(2, OUTPUT_WIDTH),
             scaledHeight.coerceIn(2, OUTPUT_HEIGHT)
         )
     }
 
-    fun build(
+    /**
+     * Builds the command line for `FFmpeg.execute`.
+     *
+     * Paths come from the app's private cache, but they are quoted when they
+     * contain whitespace so a relocated cache directory can never break the
+     * command.
+     */
+    fun buildCommand(
         inputPath: String,
         outputPath: String,
         plan: SegmentPlan,
@@ -57,7 +67,26 @@ object FfmpegCommandBuilder {
         sourceHeight: Int,
         rotationDegrees: Int,
         hasAudio: Boolean
-    ): Array<String> {
+    ): String = buildArguments(
+        inputPath,
+        outputPath,
+        plan,
+        sourceWidth,
+        sourceHeight,
+        rotationDegrees,
+        hasAudio
+    ).joinToString(" ") { quote(it) }
+
+    /** Same as [buildCommand] but as an argument list, which is easier to test. */
+    fun buildArguments(
+        inputPath: String,
+        outputPath: String,
+        plan: SegmentPlan,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        rotationDegrees: Int,
+        hasAudio: Boolean
+    ): List<String> {
         require(plan.segments.isNotEmpty()) { "The segment plan is empty." }
 
         val args = ArrayList<String>()
@@ -69,9 +98,16 @@ object FfmpegCommandBuilder {
         args += "-stats"
 
         // Fast, accurate input seeking: one input per retained segment.
+        // Autorotation is disabled because the filter graph applies it
+        // deterministically from the platform rotation value.
         for (segment in plan.segments) {
             val start = String.format(Locale.US, "%.3f", segment.startSeconds.coerceAtLeast(0.0))
-            val duration = String.format(Locale.US, "%.3f", segment.durationSeconds.coerceAtLeast(0.001))
+            val duration = String.format(
+                Locale.US,
+                "%.3f",
+                segment.durationSeconds.coerceAtLeast(0.001)
+            )
+            args += "-noautorotate"
             args += "-ss"
             args += start
             args += "-t"
@@ -123,15 +159,11 @@ object FfmpegCommandBuilder {
         }
 
         args += "-c:v"
-        args += "libx264"
-        args += "-preset"
-        args += "veryfast"
-        args += "-crf"
-        args += "23"
+        args += "libopenh264"
+        args += "-b:v"
+        args += VIDEO_BITRATE
         args += "-pix_fmt"
         args += "yuv420p"
-        args += "-profile:v"
-        args += "high"
 
         if (hasAudio) {
             args += "-c:a"
@@ -142,9 +174,6 @@ object FfmpegCommandBuilder {
             args += "48000"
             args += "-ac"
             args += "2"
-            // FFmpeg 2.4's native AAC encoder is marked experimental.
-            args += "-strict"
-            args += "-2"
         }
 
         args += "-movflags"
@@ -155,7 +184,17 @@ object FfmpegCommandBuilder {
         args += "mp4"
         args += outputPath
 
-        return args.toTypedArray()
+        return args
+    }
+
+    /**
+     * Quotes one argument for MobileFFmpeg's command line parser. MobileFFmpeg
+     * splits on unquoted spaces and understands both single and double quotes.
+     */
+    fun quote(argument: String): String {
+        if (argument.isEmpty()) return "\"\""
+        require('"' !in argument) { "Unsupported quote character in command argument." }
+        return if (argument.any { it.isWhitespace() }) "\"$argument\"" else argument
     }
 
     private fun rotationFilter(degrees: Int): String? {

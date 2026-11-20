@@ -1,92 +1,119 @@
 package com.shoo.cut
 
-import android.content.Context
-import android.os.Build
-import java.io.File
-import java.util.concurrent.atomic.AtomicBoolean
+import android.util.Log
+import com.arthenica.mobileffmpeg.Config
+import com.arthenica.mobileffmpeg.FFmpeg
+import java.util.Collections
+import java.util.Locale
 
 /**
- * Runs the FFmpeg executable that ships inside the verified
- * `io.github.pao11:ffmpeg-android:1.1.0` AAR (`libffmpeg.so`).
+ * Runs FFmpeg in-process through the verified MobileFFmpeg build shipped by
+ * `com.bihe0832.android:lib-ffmpeg-mobile-aaf:8.5.0`.
  *
- * The AAR installs the binary into the app's native library directory. Running
- * it with [ProcessBuilder] (rather than the library's deprecated AsyncTask
- * wrapper) gives real cancellation: [cancel] destroys the process and the
- * blocking read loop then returns normally.
+ * That AAR contains genuine `arm64-v8a`, `armeabi-v7a`, `x86` and `x86_64`
+ * libraries (FFmpeg 4.4-dev, NDK r25b) with `libopenh264`, the native AAC
+ * encoder, `concat`, `trim`, `pad`, `scale` (bicubic) and `setsar`, and it
+ * bundles the `libc++_shared.so` those libraries link against.
  *
- * Only arm64-v8a and armeabi-v7a natives are packaged, so unsupported ABIs get
- * a clear message instead of a crash.
+ * [run] blocks the calling worker thread and returns FFmpeg's exit code.
+ * [cancel] asks FFmpeg to stop; the blocking call then returns
+ * [Config.RETURN_CODE_CANCEL].
  */
-class VideoProcessor(private val context: Context) {
+class VideoProcessor {
 
-    private val cancelled = AtomicBoolean(false)
+    private val cancelRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val logLines = Collections.synchronizedList(ArrayList<String>())
 
     @Volatile
-    private var process: Process? = null
-
-    private fun ffmpegBinary(): File {
-        val binary = File(context.applicationInfo.nativeLibraryDir, BINARY_NAME)
-        if (!binary.isFile) {
-            throw IllegalStateException(
-                "FFmpeg is not available for this device ABI " +
-                    "(${Build.SUPPORTED_ABIS.joinToString()}). " +
-                    "This build supports arm64-v8a and armeabi-v7a."
-            )
-        }
-        return binary
-    }
+    private var running = false
 
     /**
-     * Runs [command] to completion, forwarding every merged stdout/stderr line to
-     * [onLine]. Returns the process exit code, or `-1` if interrupted.
+     * Executes [command], forwarding the encoded output time in milliseconds to
+     * [onOutputTimeMillis]. Returns FFmpeg's exit code.
      */
-    fun run(command: Array<String>, onLine: (String) -> Unit): Int {
-        cancelled.set(false)
-        val binary = ffmpegBinary()
-        val builder = ProcessBuilder(listOf(binary.absolutePath) + command.toList())
-        builder.redirectErrorStream(true)
+    fun run(command: String, onOutputTimeMillis: (Int) -> Unit): Int {
+        cancelRequested.set(false)
+        logLines.clear()
 
-        val active = builder.start()
-        process = active
-        try {
-            try {
-                active.outputStream.close()
-            } catch (_: Exception) {
-                // FFmpeg runs with -nostdin; closing stdin is best-effort.
-            }
-            active.inputStream.bufferedReader().use { reader ->
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    onLine(line)
+        Config.enableStatisticsCallback { statistics ->
+            if (!cancelRequested.get()) {
+                try {
+                    onOutputTimeMillis(statistics.time)
+                } catch (e: RuntimeException) {
+                    Log.w(TAG, "Progress callback failed", e)
                 }
             }
-        } finally {
-            process = null
+        }
+        Config.enableLogCallback { message ->
+            appendLog(message.text)
         }
 
         return try {
-            active.waitFor()
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            active.destroy()
-            -1
+            running = true
+            FFmpeg.execute(command)
+        } finally {
+            running = false
+            Config.enableStatisticsCallback(null)
+            Config.enableLogCallback(null)
         }
     }
 
-    /** Requests cancellation of the currently running FFmpeg process. */
+    /**
+     * Requests a graceful stop of the running FFmpeg session. Safe to call from
+     * the main thread while [run] blocks on the worker thread.
+     */
     fun cancel() {
-        cancelled.set(true)
-        val active = process ?: return
+        if (!running) return
+        cancelRequested.set(true)
         try {
-            active.destroy()
-        } catch (_: Exception) {
-            // Best-effort.
+            FFmpeg.cancel()
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Cancelling FFmpeg failed", e)
         }
     }
 
-    fun wasCancelled(): Boolean = cancelled.get()
+    fun wasCancelled(): Boolean = cancelRequested.get()
+
+    /**
+     * The tail of FFmpeg's own log, so a failed encode can show a useful
+     * diagnostic instead of a bare exit code.
+     */
+    fun diagnostics(maxLines: Int = 12, maxChars: Int = 1200): String {
+        val tail = synchronized(logLines) {
+            logLines.takeLast(maxLines.coerceAtLeast(1))
+        }
+        if (tail.isEmpty()) return ""
+        val joined = tail.joinToString("\n")
+        return if (joined.length <= maxChars) joined else joined.takeLast(maxChars)
+    }
+
+    /** Version string of the bundled FFmpeg, for the UI / diagnostics. */
+    fun ffmpegVersion(): String = try {
+        Config.getFFmpegVersion()
+    } catch (e: Throwable) {
+        "unknown"
+    }
+
+    private fun appendLog(text: String) {
+        val cleaned = text.trim()
+        if (cleaned.isEmpty()) return
+        synchronized(logLines) {
+            logLines.add(cleaned)
+            if (logLines.size > MAX_LOG_LINES) {
+                logLines.removeAt(0)
+            }
+        }
+    }
 
     companion object {
-        private const val BINARY_NAME = "libffmpeg.so"
+        private const val TAG = "VideoProcessor"
+        private const val MAX_LOG_LINES = 80
+
+        /** Human-readable exit-code description used in error messages. */
+        fun describeReturnCode(code: Int): String = when (code) {
+            Config.RETURN_CODE_SUCCESS -> "success"
+            Config.RETURN_CODE_CANCEL -> "cancelled"
+            else -> String.format(Locale.US, "exit code %d", code)
+        }
     }
 }
