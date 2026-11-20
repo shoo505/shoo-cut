@@ -46,7 +46,6 @@ class ProcessingService : Service() {
         const val EXTRA_STATUS = "status"
         const val EXTRA_ETA_MILLIS = "eta_millis"
         const val EXTRA_MODE = "mode"
-        const val EXTRA_OUTPUT_URI = "output_uri"
         const val EXTRA_ERROR = "error"
         const val EXTRA_JOB_STATE = "job_state"
 

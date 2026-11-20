@@ -9,8 +9,6 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.View
-import android.widget.Button
-import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -151,7 +149,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isProcessing(): Boolean {
-        // We'll track this via broadcasts; for now allow if no active job known
         return binding.buttonCancel.visibility == View.VISIBLE
     }
 
@@ -159,7 +156,6 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             binding.textFileName.text = getString(R.string.no_video_selected)
             binding.textFileDetails.text = getString(R.string.no_video_details)
-            binding.textRetainedEstimate.text = getString(R.string.retained_placeholder)
             binding.textSegmentInfo.text = ""
             binding.textOutputSpecs.text = ""
             binding.buttonStart.isEnabled = false
@@ -195,7 +191,6 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             binding.textFileName.text = uri.lastPathSegment ?: getString(R.string.no_video_selected)
             binding.textFileDetails.text = getString(R.string.reading_video)
-            binding.textRetainedEstimate.text = getString(R.string.retained_placeholder)
             binding.textSegmentInfo.text = ""
             binding.textOutputSpecs.text = ""
             binding.textOutputLocation.text = getString(R.string.output_not_set)
@@ -246,10 +241,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val selected = SegmentSelector.select(info.durationSeconds)
                 plan = selected
-                binding.textRetainedEstimate.text = getString(
-                    R.string.retained_estimate,
-                    formatDuration(selected.actualRetainedSeconds)
-                )
+                // textRetainedEstimate removed from layout - info shown in file details instead
                 binding.textSegmentInfo.text = resources.getQuantityString(
                     R.plurals.segment_count,
                     selected.segments.size,
@@ -258,7 +250,7 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 plan = null
                 binding.buttonStart.isEnabled = false
-                binding.textRetainedEstimate.text = e.message ?: getString(R.string.error_metadata)
+                binding.textSegmentInfo.text = e.message ?: getString(R.string.error_metadata)
             }
         }
     }
