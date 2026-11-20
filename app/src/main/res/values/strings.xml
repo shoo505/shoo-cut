@@ -11,7 +11,10 @@
     <string name="unknown_size">Unknown size</string>
 
     <string name="video_details">%1$s • %2$s • %3$s</string>
-    <string name="segment_count">4 parts</string>
+    <plurals name="segment_count">
+        <item quantity="one">%1$d part</item>
+        <item quantity="other">%1$d parts</item>
+    </plurals>
     <string name="output_specs_stream_copy">Original quality • Stream copy</string>
 
     <string name="start_processing">Start Processing</string>
