@@ -1,3 +1,4 @@
+import org.gradle.api.tasks.Delete
 buildscript {
     repositories {
         google()
@@ -16,8 +17,6 @@ allprojects {
         mavenCentral()
     }
 }
-
-import org.gradle.api.tasks.Delete
 
 tasks.register("clean", Delete) {
     delete(rootProject.buildDir)
