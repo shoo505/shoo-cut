@@ -1,10 +1,12 @@
 package com.shoo.cut
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.util.Log
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -12,10 +14,20 @@ import java.io.OutputStream
 /** Thrown for storage and file I/O problems with a user-presentable message. */
 class StorageException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+/** What the platform media stack can read back from a finished output document. */
+data class OutputProbe(
+    val hasVideo: Boolean,
+    val hasAudio: Boolean,
+    val durationMs: Long,
+    val width: Int,
+    val height: Int
+)
+
 /**
  * Owns all file-system work: application cache temp files, streaming copies from
- * `content://` URIs, streaming writes to the SAF destination folder and free-space
- * checks. Nothing here loads a whole video into memory.
+ * `content://` URIs, document creation/writing inside the selected SAF folder and
+ * free-space checks. Nothing here loads a whole video into memory and nothing here
+ * converts a `content://` URI into a filesystem path.
  */
 class StorageManager(private val context: Context) {
 
@@ -32,7 +44,7 @@ class StorageManager(private val context: Context) {
      * [onProgress] receives the cumulative number of bytes copied.
      */
     fun copyUriToFile(uri: Uri, destination: File, onProgress: ((Long) -> Unit)? = null) {
-        logUri("copyUriToFile input", uri)
+        Log.d(TAG, "copyUriToFile: $uri")
         val input: InputStream = context.contentResolver.openInputStream(uri)
             ?: throw StorageException("Cannot open the selected video.")
         input.use { source ->
@@ -52,69 +64,116 @@ class StorageManager(private val context: Context) {
         if (destination.length() <= 0L) {
             throw StorageException("The selected video is empty.")
         }
+        Log.d(TAG, "copyUriToFile: copied ${destination.length()} bytes")
     }
 
     /**
-     * Pre-creates four output documents in the selected SAF folder.
-     * Returns a map of segment index (0-3) to output document URI.
+     * Resolves the root document URI of the folder returned by
+     * ACTION_OPEN_DOCUMENT_TREE.
+     *
+     * `DocumentsContract.createDocument()` must receive a *document* URI. If the
+     * raw tree URI is passed instead, `DocumentsProvider.enforceTree()` calls
+     * `DocumentsContract.getDocumentId(treeUri)`, which only accepts
+     * `/tree/<id>/document/<id>` URIs and throws
+     * `IllegalArgumentException("Invalid URI: content://.../tree/...")`.
      */
-    fun createOutputDocuments(folderUri: Uri, baseFileName: String): Map<Int, Uri> {
-        logUri("createOutputDocuments folderUri", folderUri)
+    fun resolveRootDocumentUri(treeUri: Uri): Uri {
+        validateTreeUri(treeUri)
+        val treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri)
+        val rootDocumentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, treeDocumentId)
+        validateDocumentUri(rootDocumentUri)
+        Log.d(TAG, "resolveRootDocumentUri: tree=$treeUri root=$rootDocumentUri")
+        return rootDocumentUri
+    }
+
+    /**
+     * Pre-creates (or reuses) the four output documents in the selected folder.
+     * Returns them in part order: index 0 -> ShooCut_Part1.mp4 ... index 3 -> Part4.
+     */
+    fun createOutputDocuments(folderUri: Uri): List<Uri> {
         validateTreeUri(folderUri)
-        val outputUris = mutableMapOf<Int, Uri>()
-        for (segmentIndex in 0..3) {
-            val segmentNumber = segmentIndex + 1
-            val fileName = "${baseFileName}_Part$segmentNumber.mp4"
-            val outputUri = createOutputDocument(folderUri, fileName)
-            logUri("createOutputDocuments outputUri[$segmentIndex]", outputUri)
-            outputUris[segmentIndex] = outputUri
+        val rootDocumentUri = resolveRootDocumentUri(folderUri)
+        return OutputNaming.partFileNames().map { fileName ->
+            createOutputDocument(folderUri, rootDocumentUri, fileName)
         }
-        return outputUris
     }
 
     /**
-     * Creates a single output document in the SAF folder.
+     * Creates one output document.
+     *
+     * @param treeUri the folder picker tree URI (used only for tree-scoped lookups)
+     * @param rootDocumentUri the folder's document URI (used as the create parent)
      */
-    private fun createOutputDocument(folderUri: Uri, fileName: String): Uri {
-        logUri("createOutputDocument folderUri", folderUri)
-        validateTreeUri(folderUri)
-        // Check if document already exists
-        val existingId = findDocumentInFolder(folderUri, fileName)
-        val outputUri = if (existingId != null) {
-            val uri = DocumentsContract.buildDocumentUriUsingTree(folderUri, existingId)
-            logUri("buildDocumentUriUsingTree result", uri)
-            uri
-        } else {
-            val newDoc = DocumentsContract.createDocument(
-                context.contentResolver,
-                folderUri,
-                "video/mp4",
-                fileName
-            )
-            if (newDoc == null) {
-                throw StorageException("Cannot create output file '$fileName' in selected folder.")
+    private fun createOutputDocument(treeUri: Uri, rootDocumentUri: Uri, fileName: String): Uri {
+        val existingId = findDocumentId(treeUri, fileName)
+        val documentUri = if (existingId != null) {
+            DocumentsContract.buildDocumentUriUsingTree(treeUri, existingId).also {
+                Log.d(TAG, "Reusing existing document '$fileName' -> $it")
             }
-            logUri("createDocument result", newDoc)
-            newDoc
+        } else {
+            try {
+                DocumentsContract.createDocument(
+                    context.contentResolver,
+                    rootDocumentUri, // document URI, never the raw tree URI
+                    MIME_TYPE_MP4,
+                    fileName
+                )
+            } catch (e: FileNotFoundException) {
+                throw StorageException("Cannot create '$fileName' in the selected folder: ${e.message}", e)
+            } catch (e: IllegalArgumentException) {
+                throw StorageException("Cannot create '$fileName' in the selected folder: ${e.message}", e)
+            } ?: throw StorageException("Cannot create output file '$fileName' in the selected folder.")
         }
-        validateDocumentUri(outputUri)
-        return outputUri
+        validateDocumentUri(documentUri)
+        Log.d(TAG, "createOutputDocument '$fileName' -> $documentUri")
+        return documentUri
     }
 
     /**
-     * Streams [source] into the pre-created SAF output document [outputUri].
+     * Finds an existing document id in the selected folder by display name.
      */
-    fun writeToOutputDocument(outputUri: Uri, source: File): Uri {
-        logUri("writeToOutputDocument outputUri", outputUri)
+    private fun findDocumentId(treeUri: Uri, fileName: String): String? {
+        val treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri)
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeDocumentId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME
+        )
+        return try {
+            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                if (idIndex < 0 || nameIndex < 0) return@use null
+                while (cursor.moveToNext()) {
+                    if (cursor.getString(nameIndex) == fileName) {
+                        return cursor.getString(idIndex)
+                    }
+                }
+                null
+            }
+        } catch (e: Exception) {
+            // Not fatal: createDocument() below will still try to create the file.
+            Log.w(TAG, "Could not list folder children for '$fileName': ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Streams [source] into the pre-created SAF output document [outputUri],
+     * closes/flushes the stream and verifies the document's real size by reading
+     * it back through the ContentResolver.
+     */
+    fun writeToOutputDocument(outputUri: Uri, source: File) {
         validateDocumentUri(outputUri)
         val sourceSize = source.length()
+        if (sourceSize <= 0L) {
+            throw StorageException("Refusing to write an empty output file.")
+        }
+
         var written = 0L
-
-        val output: OutputStream = context.contentResolver.openOutputStream(outputUri, "w")
-            ?: throw StorageException("Cannot open output file for writing.")
-
-        source.inputStream().use { input ->
-            output.use { out ->
+        val output = openTruncatingOutputStream(outputUri)
+        output.use { out ->
+            source.inputStream().use { input ->
                 val buffer = ByteArray(BUFFER_SIZE)
                 while (true) {
                     val read = input.read(buffer)
@@ -122,110 +181,136 @@ class StorageManager(private val context: Context) {
                     out.write(buffer, 0, read)
                     written += read
                 }
-                out.flush()
             }
+            out.flush()
         }
 
-        // Verify written size matches source
         if (written != sourceSize) {
-            throw StorageException("Output file size mismatch: expected $sourceSize bytes, wrote $written bytes")
+            throw StorageException("Write to the output file was incomplete ($written of $sourceSize bytes).")
         }
 
-        // Verify the written document has content
-        val writtenSize = getDocumentSize(outputUri)
-        if (writtenSize <= 0) {
-            throw StorageException("Output file is empty after writing.")
+        val verifiedSize = getDocumentSize(outputUri)
+        if (verifiedSize != sourceSize) {
+            throw StorageException(
+                "The saved file is $verifiedSize bytes but $sourceSize bytes were written."
+            )
         }
-        if (writtenSize != sourceSize) {
-            throw StorageException("Output file size mismatch after verification: expected $sourceSize bytes, document reports $writtenSize bytes")
-        }
-
-        return outputUri
+        Log.d(TAG, "writeToOutputDocument: verified $verifiedSize bytes at $outputUri")
     }
 
-    /**
-     * Finds an existing document in the folder by name.
-     * Returns the document ID if found, null otherwise.
-     */
-    private fun findDocumentInFolder(folderUri: Uri, fileName: String): String? {
-        logUri("findDocumentInFolder folderUri", folderUri)
-        validateTreeUri(folderUri)
-        // For tree URIs, we need to use the tree document ID to build the children URI
-        val treeDocId = DocumentsContract.getTreeDocumentId(folderUri)
-        logUri("getTreeDocumentId", Uri.parse("content://docid/$treeDocId"))
-        val projection = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(folderUri, treeDocId)
-        logUri("buildChildDocumentsUriUsingTree childrenUri", childrenUri)
-        return context.contentResolver.query(childrenUri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                while (!cursor.isAfterLast) {
-                    val name = cursor.getString(nameIndex)
-                    val id = cursor.getString(idIndex)
-                    logUri("Found document", Uri.parse("content://docid/$id"), "name=$name")
-                    if (name == fileName) {
-                        return id
-                    }
-                    cursor.moveToNext()
-                }
-            }
-            null
+    private fun openTruncatingOutputStream(uri: Uri): OutputStream {
+        val stream = try {
+            context.contentResolver.openOutputStream(uri, "wt")
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Provider rejected 'wt' mode, retrying with 'w': ${e.message}")
+            context.contentResolver.openOutputStream(uri, "w")
+        } catch (e: UnsupportedOperationException) {
+            context.contentResolver.openOutputStream(uri, "w")
         }
+        return stream ?: throw StorageException("Cannot open the output file for writing.")
     }
 
     /** Opens an input stream for a SAF document URI. */
     fun openInputStream(uri: Uri): InputStream? {
-        logUri("openInputStream", uri)
         validateDocumentUri(uri)
         return context.contentResolver.openInputStream(uri)
     }
 
     /**
-     * Gets the size of a document via ContentResolver.
+     * Returns the real size of a document. Some providers do not report
+     * COLUMN_SIZE (or report it stale), so this falls back to the file descriptor
+     * stat size and finally to counting the stream.
      */
     fun getDocumentSize(uri: Uri): Long {
-        logUri("getDocumentSize", uri)
         validateDocumentUri(uri)
-        val projection = arrayOf(DocumentsContract.Document.COLUMN_SIZE)
-        return context.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_SIZE), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
-                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
-                    return cursor.getLong(sizeIndex)
+
+        val queried = queryColumnSize(uri)
+        if (queried > 0L) return queried
+
+        val statSize = try {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+        } catch (e: Exception) {
+            Log.w(TAG, "statSize failed for $uri: ${e.message}")
+            null
+        }
+        if (statSize != null && statSize > 0L) return statSize
+
+        return countStreamBytes(uri)
+    }
+
+    private fun queryColumnSize(uri: Uri): Long {
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(DocumentsContract.Document.COLUMN_SIZE),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                    if (index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else -1L
+                } else {
+                    -1L
                 }
+            } ?: -1L
+        } catch (e: Exception) {
+            Log.w(TAG, "query size failed for $uri: ${e.message}")
+            -1L
+        }
+    }
+
+    private fun countStreamBytes(uri: Uri): Long {
+        val input = context.contentResolver.openInputStream(uri)
+            ?: throw StorageException("Cannot read back the saved file.")
+        return input.use { stream ->
+            val buffer = ByteArray(BUFFER_SIZE)
+            var total = 0L
+            while (true) {
+                val read = stream.read(buffer)
+                if (read < 0) break
+                total += read
             }
-            0L
-        } ?: 0L
-    }
-
-    /** Validates that a URI is a tree URI (from ACTION_OPEN_DOCUMENT_TREE). */
-    private fun validateTreeUri(uri: Uri) {
-        if (!isTreeUri(uri)) {
-            Log.e(TAG, "Expected tree URI but got: $uri")
-            throw StorageException("Expected tree URI (from folder picker), got: $uri")
+            total
         }
     }
 
-    /** Validates that a URI is a document URI (from createDocument or buildDocumentUriUsingTree). */
-    private fun validateDocumentUri(uri: Uri) {
-        if (isTreeUri(uri)) {
-            Log.e(TAG, "Expected document URI but got tree URI: $uri")
-            throw StorageException("Expected document URI (for file operations), got tree URI: $uri")
+    /**
+     * Reads the saved document back with [MediaMetadataRetriever] to prove it is a
+     * finalized video that Android's media stack can open, including its duration
+     * and stream presence.
+     */
+    fun probeOutput(uri: Uri): OutputProbe {
+        validateDocumentUri(uri)
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, uri)
+            val hasVideo = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) == "yes"
+            val hasAudio = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes"
+            val durationMs = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: 0L
+            val width = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull() ?: 0
+            val height = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull() ?: 0
+            OutputProbe(hasVideo, hasAudio, durationMs, width, height)
+        } catch (e: Exception) {
+            throw StorageException(
+                "The saved output could not be read back as a video: ${e.message ?: "unknown error"}",
+                e
+            )
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {
+                // Best-effort release.
+            }
         }
-    }
-
-    /** Checks if a URI is a tree URI (from ACTION_OPEN_DOCUMENT_TREE). */
-    private fun isTreeUri(uri: Uri): Boolean {
-        return "/tree/" in uri.toString()
-    }
-
-    private fun logUri(label: String, uri: Uri, extra: String = "") {
-        val scheme = uri.scheme
-        val authority = uri.authority
-        val path = uri.path
-        val isTree = isTreeUri(uri)
-        Log.d(TAG, "$label: scheme=$scheme, authority=$authority, path=$path, isTree=$isTree $extra")
     }
 
     /** True when the cache partition can hold [requiredBytes] plus a safety margin. */
@@ -243,8 +328,23 @@ class StorageManager(private val context: Context) {
         }
     }
 
+    private fun validateTreeUri(uri: Uri) {
+        if (!SafUri.isTreeUri(uri.pathSegments)) {
+            Log.e(TAG, "Expected tree URI but got: $uri")
+            throw StorageException("The selected folder is not a valid Android folder URI.")
+        }
+    }
+
+    private fun validateDocumentUri(uri: Uri) {
+        if (!SafUri.isDocumentUri(uri.pathSegments)) {
+            Log.e(TAG, "Expected document URI but got: $uri")
+            throw StorageException("The saved file location is not a valid Android document URI.")
+        }
+    }
+
     companion object {
         private const val BUFFER_SIZE = 64 * 1024
+        private const val MIME_TYPE_MP4 = "video/mp4"
         const val MIN_FREE_MARGIN_BYTES = 50L * 1024 * 1024
     }
 }

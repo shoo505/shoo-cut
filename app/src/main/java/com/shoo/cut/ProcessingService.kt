@@ -5,30 +5,26 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.util.Log
-import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import java.util.UUID
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Foreground service that handles 4-segment stream-copy processing independently of the Activity lifecycle.
- * Continues processing when app is minimized, screen is off, or Activity is destroyed.
+ * Foreground service that handles 4-part stream-copy processing independently of
+ * the Activity lifecycle. Continues while the app is minimized or the screen is off,
+ * subject to Android background restrictions.
  */
 class ProcessingService : Service() {
 
     private val TAG = "ProcessingService"
 
-    // Broadcast actions - using LocalBroadcastManager for app-internal communication
     companion object {
         const val ACTION_START = "com.shoo.cut.action.START_PROCESSING"
         const val ACTION_CANCEL = "com.shoo.cut.action.CANCEL_PROCESSING"
@@ -56,18 +52,31 @@ class ProcessingService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "video_processing"
         private const val CHANNEL_NAME = "Video Processing"
+
+        /**
+         * Last known job state for this process. Lets a recreated Activity restore
+         * the UI without starting the (possibly absent) foreground service.
+         */
+        @Volatile
+        var lastState: JobState? = null
+            private set
     }
 
     private lateinit var processingManager: ProcessingManager
     private lateinit var storageManager: StorageManager
     private lateinit var metadataReader: VideoMetadataReader
     private lateinit var notificationManager: NotificationManager
-    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var currentJobState: JobState? = null
-    private var jobStartTime: Long = 0
-    private var lastProgressUpdate: Long = 0
-    private var currentSegmentIndex = 0
+    private var jobStartTime = 0L
+    private var lastProgressUpdate = 0L
+
+    /**
+     * True from a start request until the job reaches a terminal state. Used to
+     * reject duplicate starts and to avoid stopping the service while metadata is
+     * still being read.
+     */
+    private val startInProgress = AtomicBoolean(false)
 
     override fun onCreate() {
         super.onCreate()
@@ -81,34 +90,71 @@ class ProcessingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) return START_NOT_STICKY
 
-        Log.d(TAG, "onStartCommand action=${intent.action} intent=$intent")
+        Log.d(TAG, "onStartCommand action=${intent.action}")
 
         when (intent.action) {
-            ACTION_START -> handleStartProcessing(intent)
-            ACTION_CANCEL -> handleCancel()
+            ACTION_START -> {
+                if (processingManager.isProcessing() || !startInProgress.compareAndSet(false, true)) {
+                    Log.w(TAG, "Ignoring duplicate start request")
+                    return START_NOT_STICKY
+                }
+                handleStartProcessing(intent)
+            }
+
+            ACTION_CANCEL -> {
+                if (hasActiveJob()) {
+                    handleCancel()
+                } else {
+                    stopSelf(startId)
+                }
+            }
+
             ACTION_GET_STATE -> {
-                // For state query, reply directly without starting foreground processing
                 sendStateBroadcast()
+                if (!hasActiveJob()) {
+                    stopSelf(startId)
+                }
             }
         }
 
         return START_NOT_STICKY
     }
 
+    private fun hasActiveJob(): Boolean =
+        startInProgress.get() || processingManager.isProcessing() || currentJobState?.isProcessing == true
+
     private fun handleStartProcessing(intent: Intent) {
         val inputUri = intent.getParcelableExtra<Uri>(EXTRA_INPUT_URI)
         val outputFolderUri = intent.getParcelableExtra<Uri>(EXTRA_OUTPUT_FOLDER_URI)
         val jobId = intent.getStringExtra(EXTRA_JOB_ID) ?: UUID.randomUUID().toString()
 
-        Log.d(TAG, "handleStartProcessing inputUri=$inputUri outputFolderUri=$outputFolderUri jobId=$jobId")
+        Log.d(TAG, "handleStartProcessing input=$inputUri folder=$outputFolderUri job=$jobId")
 
         if (inputUri == null || outputFolderUri == null) {
+            startInProgress.set(false)
             sendErrorBroadcast("Missing input or output folder URI")
+            stopForegroundCompat()
             stopSelf()
             return
         }
 
-        // Read metadata on background thread
+        currentJobState = null
+        lastState = null
+
+        // Must enter the foreground within a few seconds of startForegroundService().
+        startForegroundCompat(
+            buildNotification(
+                status = "Preparing video…",
+                progress = 0,
+                indeterminate = true,
+                ongoing = true,
+                showProgress = true,
+                showCancel = true,
+                bigText = "Preparing video…"
+            )
+        )
+
+        // Reading metadata must not run on the main thread.
         Thread {
             try {
                 val metadata = metadataReader.read(inputUri)
@@ -116,14 +162,10 @@ class ProcessingService : Service() {
 
                 jobStartTime = System.currentTimeMillis()
                 lastProgressUpdate = jobStartTime
-                currentSegmentIndex = 0
 
-                currentJobState = JobState.createInitial(jobId, inputUri, outputFolderUri, metadata)
-
-                // Show initial notification
+                publishState(JobState.createInitial(jobId, inputUri, outputFolderUri, metadata))
                 showNotification(currentJobState!!)
 
-                // Start processing on worker thread
                 processingManager.start(
                     inputUri,
                     outputFolderUri,
@@ -133,92 +175,120 @@ class ProcessingService : Service() {
                         override fun onProgress(percent: Int, status: String) {
                             val now = System.currentTimeMillis()
                             val etaMillis = calculateEta(percent, now)
-                            currentJobState = currentJobState?.copy(
+                            val state = currentJobState ?: return
+                            val updated = state.copy(
                                 progressPercent = percent,
                                 status = status,
                                 etaMillis = etaMillis
                             )
-                            // Throttle notification updates to ~1 second
+                            publishState(updated)
+
+                            // Throttle notification updates to ~1 second, but always
+                            // broadcast progress so the Activity stays current.
                             if (now - lastProgressUpdate >= 1000 || percent >= 100) {
                                 lastProgressUpdate = now
-                                showNotification(currentJobState!!)
+                                showNotification(updated)
                             }
                             sendProgressBroadcast(percent, status, etaMillis)
                         }
 
                         override fun onSegmentComplete(segmentIndex: Int, outputUri: Uri) {
-                            currentSegmentIndex = segmentIndex
-                            currentJobState = currentJobState?.copy(
-                                outputFileNames = currentJobState!!.outputFileNames.mapIndexed { i, name ->
-                                    if (i == segmentIndex) "$name ✓" else name
+                            val state = currentJobState ?: return
+                            val updated = state.copy(
+                                outputFileNames = state.outputFileNames.mapIndexed { index, name ->
+                                    if (index == segmentIndex) "$name ✓" else name
                                 }
                             )
-                            showNotification(currentJobState!!)
+                            publishState(updated)
+                            showNotification(updated)
                             sendSegmentCompleteBroadcast(segmentIndex, outputUri)
                         }
 
                         override fun onAllComplete(outputUris: List<Uri>) {
-                            currentJobState = currentJobState?.copy(
-                                progressPercent = 100,
-                                status = "All 4 segments complete",
-                                etaMillis = 0,
-                                isProcessing = false,
-                                isCompleted = true
-                            )
-                            showNotification(currentJobState!!)
+                            val state = currentJobState
+                            if (state != null) {
+                                val updated = state.copy(
+                                    progressPercent = 100,
+                                    status = "All 4 parts saved",
+                                    etaMillis = 0L,
+                                    isProcessing = false,
+                                    isCompleted = true
+                                )
+                                publishState(updated)
+                                showNotification(updated)
+                            }
                             sendCompletedBroadcast(outputUris)
-                            stopForeground(true)
-                            stopSelf()
+                            finishService()
                         }
 
                         override fun onError(message: String) {
-                            currentJobState = currentJobState?.copy(
-                                status = "Error: $message",
-                                etaMillis = null,
-                                isProcessing = false,
-                                errorMessage = message
-                            )
-                            showNotification(currentJobState!!)
+                            val state = currentJobState
+                            if (state != null) {
+                                val updated = state.copy(
+                                    status = "Error: $message",
+                                    etaMillis = null,
+                                    isProcessing = false,
+                                    errorMessage = message
+                                )
+                                publishState(updated)
+                                showNotification(updated)
+                            }
                             sendErrorBroadcast(message)
-                            stopForeground(true)
-                            stopSelf()
+                            finishService()
                         }
 
                         override fun onCancelled() {
-                            currentJobState = currentJobState?.copy(
-                                status = "Cancelled",
-                                etaMillis = null,
-                                isProcessing = false,
-                                isCancelled = true
-                            )
-                            showNotification(currentJobState!!)
+                            val state = currentJobState
+                            if (state != null) {
+                                val updated = state.copy(
+                                    status = "Cancelled",
+                                    etaMillis = null,
+                                    isProcessing = false,
+                                    isCancelled = true
+                                )
+                                publishState(updated)
+                                showNotification(updated)
+                            }
                             sendCancelledBroadcast()
-                            stopForeground(true)
-                            stopSelf()
+                            finishService()
                         }
                     }
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "handleStartProcessing failed", e)
+                Log.e(TAG, "Failed to start processing", e)
+                startInProgress.set(false)
                 sendErrorBroadcast(e.message ?: "Failed to start processing")
+                notificationManager.cancel(NOTIFICATION_ID)
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
         }.start()
     }
 
     private fun handleCancel() {
-        if (currentJobState?.isProcessing == true) {
+        if (processingManager.isProcessing()) {
             processingManager.cancel()
         }
+    }
+
+    private fun finishService() {
+        startInProgress.set(false)
+        stopForegroundCompat()
+        stopSelf()
     }
 
     private fun calculateEta(percent: Int, now: Long): Long? {
         if (percent <= 0 || jobStartTime == 0L) return null
         val elapsed = now - jobStartTime
-        if (elapsed < 2000L) return null // Need some progress data first
+        if (elapsed < 2000L) return null
         val estimatedTotal = (elapsed * 100.0 / percent).toLong()
         val remaining = estimatedTotal - elapsed
         return if (remaining > 0L) remaining else 0L
+    }
+
+    private fun publishState(state: JobState) {
+        currentJobState = state
+        lastState = state
     }
 
     private fun sendProgressBroadcast(percent: Int, status: String, etaMillis: Long?) {
@@ -227,7 +297,7 @@ class ProcessingService : Service() {
             putExtra(EXTRA_STATUS, status)
             etaMillis?.let { putExtra(EXTRA_ETA_MILLIS, it) }
         }
-        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        broadcast(intent)
     }
 
     private fun sendSegmentCompleteBroadcast(segmentIndex: Int, outputUri: Uri) {
@@ -235,34 +305,37 @@ class ProcessingService : Service() {
             putExtra(EXTRA_SEGMENT_INDEX, segmentIndex)
             putExtra(EXTRA_OUTPUT_URIS, outputUri)
         }
-        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        broadcast(intent)
     }
 
     private fun sendCompletedBroadcast(outputUris: List<Uri>) {
         val intent = Intent(BROADCAST_COMPLETED).apply {
             putParcelableArrayListExtra(EXTRA_OUTPUT_URIS, ArrayList(outputUris))
         }
-        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        broadcast(intent)
     }
 
     private fun sendErrorBroadcast(message: String) {
         val intent = Intent(BROADCAST_ERROR).apply {
             putExtra(EXTRA_ERROR, message)
         }
-        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        broadcast(intent)
     }
 
     private fun sendCancelledBroadcast() {
-        sendBroadcast(Intent(BROADCAST_CANCELLED))
+        broadcast(Intent(BROADCAST_CANCELLED))
     }
 
     private fun sendStateBroadcast() {
-        currentJobState?.let { state ->
-            val intent = Intent(BROADCAST_STATE).apply {
-                putExtra(EXTRA_JOB_STATE, state)
-            }
-            androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        val state = currentJobState ?: lastState ?: return
+        val intent = Intent(BROADCAST_STATE).apply {
+            putExtra(EXTRA_JOB_STATE, state)
         }
+        broadcast(intent)
+    }
+
+    private fun broadcast(intent: Intent) {
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
     private fun createNotificationChannel() {
@@ -282,37 +355,79 @@ class ProcessingService : Service() {
 
     private fun showNotification(state: JobState) {
         val progress = state.progressPercent.coerceIn(0, 100)
-        val isIndeterminate = state.isProcessing && progress == 0
+        val isProcessing = state.isProcessing
 
-        val cancelIntent = Intent(this, ProcessingService::class.java).apply {
-            action = ACTION_CANCEL
+        val bigText = when {
+            state.isCompleted -> "All 4 parts saved in the selected folder."
+            state.isCancelled -> "Processing cancelled."
+            state.errorMessage != null -> "Error: ${state.errorMessage}"
+            state.etaMillis != null -> "${state.status}\n${formatEta(state.etaMillis)} remaining"
+            else -> "${state.status}\nEstimating…"
         }
-        val cancelPendingIntent = PendingIntent.getService(
-            this, 0, cancelIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+
+        val notification = buildNotification(
+            status = state.status,
+            progress = progress,
+            indeterminate = isProcessing && progress == 0,
+            ongoing = isProcessing,
+            showProgress = isProcessing,
+            showCancel = isProcessing,
+            bigText = bigText
         )
 
+        if (isProcessing) {
+            startForegroundCompat(notification)
+        } else {
+            notificationManager.notify(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun buildNotification(
+        status: String,
+        progress: Int,
+        indeterminate: Boolean,
+        ongoing: Boolean,
+        showProgress: Boolean,
+        showCancel: Boolean,
+        bigText: String?
+    ): Notification {
         val contentIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val contentPendingIntent = PendingIntent.getActivity(
-            this, 0, contentIntent,
+            this,
+            0,
+            contentIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle("Shoo Cut")
-            .setContentText("$progress% • ${state.status}")
-            .setOngoing(state.isProcessing)
-            .setPriority(if (state.isProcessing) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_DEFAULT)
-            .setProgress(100, progress, isIndeterminate)
+            .setContentText(if (showProgress) "$progress% • $status" else status)
+            .setOngoing(ongoing)
+            .setPriority(
+                if (ongoing) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_DEFAULT
+            )
             .setContentIntent(contentPendingIntent)
-            .setAutoCancel(!state.isProcessing)
+            .setAutoCancel(!ongoing)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 
-        if (state.isProcessing) {
+        if (showProgress) {
+            builder.setProgress(100, progress, indeterminate)
+        }
+
+        if (showCancel) {
+            val cancelIntent = Intent(this, ProcessingService::class.java).apply {
+                action = ACTION_CANCEL
+            }
+            val cancelPendingIntent = PendingIntent.getService(
+                this,
+                0,
+                cancelIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
             builder.addAction(
                 NotificationCompat.Action.Builder(
                     android.R.drawable.ic_menu_close_clear_cancel,
@@ -322,30 +437,28 @@ class ProcessingService : Service() {
             )
         }
 
-        // Add ETA to notification
-        val style = NotificationCompat.BigTextStyle()
-        if (state.etaMillis != null) {
-            val etaText = formatEta(state.etaMillis!!)
-            style.bigText("${state.status}\n$etaText remaining")
-        } else if (state.isProcessing) {
-            style.bigText("${state.status}\nEstimating…")
-        } else if (state.isCompleted) {
-            style.bigText("All 4 segments complete")
-            builder.setContentText("Completed")
-        } else if (state.isCancelled) {
-            style.bigText("Processing cancelled")
-            builder.setContentText("Cancelled")
-        } else if (state.errorMessage != null) {
-            style.bigText("Error: ${state.errorMessage}")
-            builder.setContentText("Error: ${state.errorMessage}")
+        if (bigText != null) {
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
         }
-        builder.setStyle(style)
 
+        return builder.build()
+    }
+
+    private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, builder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
         } else {
-            startForeground(NOTIFICATION_ID, builder.build())
+            startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    /** Detaches the notification so a completed/error state stays visible. */
+    private fun stopForegroundCompat() {
+        stopForeground(STOP_FOREGROUND_DETACH)
     }
 
     private fun formatEta(millis: Long): String {

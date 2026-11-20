@@ -88,13 +88,12 @@ data class JobState(
             outputFolderUri: Uri,
             metadata: VideoMetadata
         ): JobState {
-            val fileNames = (1..4).map { "${metadata.displayName.substringBeforeLast('.', metadata.displayName).ifBlank { "shoo_cut" }}_$it.mp4" }
             return JobState(
                 jobId = jobId,
                 inputUriString = inputUri.toString(),
                 outputFolderUriString = outputFolderUri.toString(),
                 inputDisplayName = metadata.displayName,
-                outputFileNames = fileNames,
+                outputFileNames = OutputNaming.partFileNames(),
                 durationSeconds = metadata.durationSeconds,
                 width = metadata.width,
                 height = metadata.height,

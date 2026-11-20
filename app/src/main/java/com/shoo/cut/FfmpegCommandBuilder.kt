@@ -58,7 +58,13 @@ object FfmpegCommandBuilder {
         args += inputPath
 
         args += "-map"
-        args += "0"
+        args += "0:v:0"
+        if (hasAudio) {
+            // Optional audio so a misdetected audio stream cannot fail the copy.
+            args += "-map"
+            args += "0:a?"
+        }
+
         args += "-c:v"
         args += "copy"
         if (hasAudio) {

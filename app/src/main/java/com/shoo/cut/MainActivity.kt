@@ -70,11 +70,10 @@ class MainActivity : AppCompatActivity() {
         setupClickListeners()
         requestNotificationPermissionIfNeeded()
         registerReceivers()
-        
-        // Request current state FIRST, then reset UI
-        // This allows state restoration to overwrite the initial reset
-        requestCurrentState()
+
+        // Reset first, then restore any known state so the restore wins.
         resetUi()
+        requestCurrentState()
     }
 
     private fun setupClickListeners() {
@@ -142,10 +141,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestCurrentState() {
+        // Restore the last known state synchronously, if there is one. This does
+        // not require the service to be alive.
+        ProcessingService.lastState?.let { restoreUiFromState(it) }
+
+        // Ask a live service for fresher state. This must not use
+        // startForegroundService(): a state query does no foreground work and
+        // would otherwise trigger a "did not call startForeground" crash.
         val intent = Intent(this, ProcessingService::class.java).apply {
             action = ProcessingService.ACTION_GET_STATE
         }
-        ContextCompat.startForegroundService(this, intent)
+        try {
+            startService(intent)
+        } catch (_: Exception) {
+            // No service available; the cached state above is all we have.
+        }
     }
 
     private fun isProcessing(): Boolean {
@@ -326,7 +336,11 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, ProcessingService::class.java).apply {
             action = ProcessingService.ACTION_CANCEL
         }
-        ContextCompat.startForegroundService(this, intent)
+        try {
+            startService(intent)
+        } catch (_: Exception) {
+            // The service is already gone; nothing left to cancel.
+        }
     }
 
     private fun onProgressUpdate(intent: Intent) {

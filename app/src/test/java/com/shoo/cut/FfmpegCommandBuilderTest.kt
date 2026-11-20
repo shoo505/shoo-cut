@@ -98,6 +98,54 @@ class FfmpegCommandBuilderTest {
     }
 
     @Test
+    fun segmentCommandStreamCopiesVideoAndAudioWithoutEncoding() {
+        val args = FfmpegCommandBuilder.buildSegmentCommand(
+            inputPath = "/tmp/in.mp4",
+            outputPath = "/tmp/out.mp4",
+            startSeconds = 10.0,
+            durationSeconds = 20.0,
+            hasAudio = true
+        )
+
+        // First video stream only, plus optional audio; no data/subtitle streams
+        // that MP4 cannot hold and that could make stream copy fail.
+        val mapValues = args.withIndex().filter { it.value == "-map" }.map { args[it.index + 1] }
+        assertEquals(listOf("0:v:0", "0:a?"), mapValues)
+
+        assertEquals(1, args.count { it == "-c:v" })
+        assertEquals("copy", args[args.indexOf("-c:v") + 1])
+        assertEquals(1, args.count { it == "-c:a" })
+        assertEquals("copy", args[args.indexOf("-c:a") + 1])
+
+        // No encoder may appear anywhere: re-encoding is forbidden.
+        val forbidden = listOf(
+            "libx264", "libx265", "libopenh264", "h264", "hevc", "mpeg4",
+            "aac", "libmp3lame", "opus"
+        )
+        for (name in forbidden) {
+            assertFalse("Unexpected encoder argument: $name", args.contains(name))
+        }
+        assertFalse(args.contains("-vf"))
+        assertFalse(args.contains("-filter_complex"))
+    }
+
+    @Test
+    fun segmentCommandWithoutAudioMapsOnlyVideo() {
+        val args = FfmpegCommandBuilder.buildSegmentCommand(
+            inputPath = "/tmp/in.mp4",
+            outputPath = "/tmp/out.mp4",
+            startSeconds = 0.0,
+            durationSeconds = 20.0,
+            hasAudio = false
+        )
+
+        val mapValues = args.withIndex().filter { it.value == "-map" }.map { args[it.index + 1] }
+        assertEquals(listOf("0:v:0"), mapValues)
+        assertFalse(args.contains("-c:a"))
+        assertFalse(args.contains("0:a?"))
+    }
+
+    @Test
     fun quoteRejectsEmbeddedDoubleQuotes() {
         assertThrows(IllegalArgumentException::class.java) {
             FfmpegCommandBuilder.quote("/tmp/a\"b.mp4")
