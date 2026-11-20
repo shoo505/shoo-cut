@@ -29,6 +29,8 @@ class ProcessingManager(
     private val processor: VideoProcessor
 ) {
 
+    private val TAG = "ProcessingManager"
+
     interface Listener {
         fun onProgress(percent: Int, status: String)
         fun onSegmentComplete(segmentIndex: Int, outputUri: Uri)
@@ -73,6 +75,8 @@ class ProcessingManager(
         tempSegmentFiles.clear()
         this.listener = listener
 
+        Log.d(TAG, "start() inputUri=$inputUri outputFolderUri=$outputFolderUri duration=${metadata.durationSeconds}s")
+
         worker.execute {
             try {
                 postProgress(1, "Checking free storage…")
@@ -102,6 +106,7 @@ class ProcessingManager(
                 // STEP B: Pre-create four output documents
                 postProgress(10, "Creating output documents…")
                 val baseFileName = buildOutputFileName(metadata.displayName, 1).replace("_1.mp4", "")
+                Log.d(TAG, "baseFileName=$baseFileName outputFolderUri=$outputFolderUri")
                 val outputUriMap = storage.createOutputDocuments(outputFolderUri, baseFileName)
                 // Convert map to ordered list for sequential processing
                 val outputUris = (0..3).map { outputUriMap[it]!! }.toMutableList()
@@ -131,6 +136,7 @@ class ProcessingManager(
                     )
 
                     val commandString = command.joinToString(" ") { FfmpegCommandBuilder.quote(it) }
+                    Log.d(TAG, "Segment $segmentNumber command: $commandString")
                     val segmentDurationMillis = (segment.durationSeconds * 1000.0).coerceAtLeast(1.0)
 
                     val exitCode = processor.run(commandString) { currentMillis ->
@@ -160,6 +166,7 @@ class ProcessingManager(
 
                     // STEP D & E: Write segment to pre-created SAF document and verify
                     val outputUri = outputUris[segmentIndex]
+                    Log.d(TAG, "Writing segment $segmentNumber to outputUri=$outputUri")
                     storage.writeToOutputDocument(outputUri, segmentOutput)
                     outputUris[segmentIndex] = outputUri
 
@@ -183,6 +190,7 @@ class ProcessingManager(
                 postProgress(100, "All 4 segments complete")
                 finishSuccess(outputUris)
             } catch (e: Exception) {
+                Log.e(TAG, "Processing failed", e)
                 if (cancelled.get() && e !is StorageException) {
                     finishCancelled()
                 } else {
@@ -199,15 +207,16 @@ class ProcessingManager(
         for ((index, uri) in outputUris.withIndex()) {
             val segmentNumber = index + 1
             postProgress(96 + index, "Verifying segment $segmentNumber…")
-            
+
             // Verify document exists and has content
             val size = storage.getDocumentSize(uri)
             if (size <= 0) {
                 throw StorageException("Output segment $segmentNumber is empty (0 bytes).")
             }
-            
+
             // Basic MP4 validation - check file signature
             validateMp4Signature(uri)
+            Log.d(TAG, "Segment $segmentNumber verified: size=$size bytes")
         }
     }
 

@@ -11,7 +11,6 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
-import android.os.IBinder
 import android.os.Looper
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
@@ -24,6 +23,8 @@ import java.util.concurrent.TimeUnit
  * Continues processing when app is minimized, screen is off, or Activity is destroyed.
  */
 class ProcessingService : Service() {
+
+    private val TAG = "ProcessingService"
 
     // Broadcast actions - using LocalBroadcastManager for app-internal communication
     companion object {
@@ -78,6 +79,8 @@ class ProcessingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) return START_NOT_STICKY
 
+        Log.d(TAG, "onStartCommand action=${intent.action} intent=$intent")
+
         when (intent.action) {
             ACTION_START -> handleStartProcessing(intent)
             ACTION_CANCEL -> handleCancel()
@@ -94,6 +97,8 @@ class ProcessingService : Service() {
         val inputUri = intent.getParcelableExtra<Uri>(EXTRA_INPUT_URI)
         val outputFolderUri = intent.getParcelableExtra<Uri>(EXTRA_OUTPUT_FOLDER_URI)
         val jobId = intent.getStringExtra(EXTRA_JOB_ID) ?: UUID.randomUUID().toString()
+
+        Log.d(TAG, "handleStartProcessing inputUri=$inputUri outputFolderUri=$outputFolderUri jobId=$jobId")
 
         if (inputUri == null || outputFolderUri == null) {
             sendErrorBroadcast("Missing input or output folder URI")
@@ -192,6 +197,7 @@ class ProcessingService : Service() {
                     }
                 )
             } catch (e: Exception) {
+                Log.e(TAG, "handleStartProcessing failed", e)
                 sendErrorBroadcast(e.message ?: "Failed to start processing")
                 stopSelf()
             }
@@ -245,8 +251,7 @@ class ProcessingService : Service() {
     }
 
     private fun sendCancelledBroadcast() {
-        val intent = Intent(BROADCAST_CANCELLED)
-        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        sendBroadcast(Intent(BROADCAST_CANCELLED))
     }
 
     private fun sendStateBroadcast() {
