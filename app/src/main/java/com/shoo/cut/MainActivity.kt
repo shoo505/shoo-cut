@@ -26,7 +26,10 @@ class MainActivity : AppCompatActivity() {
     private val metadataExecutor = Executors.newSingleThreadExecutor()
 
     private var inputUri: Uri? = null
+    /** Destination chosen for the *next* run; cleared after a successful save. */
     private var outputUri: Uri? = null
+    /** Most recently written document, used by the Open button. */
+    private var lastResultUri: Uri? = null
     private var metadata: VideoMetadata? = null
     private var plan: SegmentPlan? = null
     private var pendingStart = false
@@ -99,6 +102,7 @@ class MainActivity : AppCompatActivity() {
 
         inputUri = uri
         outputUri = null
+        lastResultUri = null
         metadata = null
         plan = null
 
@@ -218,7 +222,7 @@ class MainActivity : AppCompatActivity() {
                     binding.textStatus.text = status
                 }
 
-                override fun onSuccess(resultUri: Uri) {
+                override fun onSuccess(outputUri: Uri) {
                     finishProcessingUi()
                     binding.progressBar.progress = 100
                     binding.textProgressPercent.text = getString(R.string.progress_percent, 100)
@@ -226,8 +230,11 @@ class MainActivity : AppCompatActivity() {
                     binding.textCompleted.visibility = View.VISIBLE
                     binding.textCompleted.text = getString(R.string.completed_message)
                     binding.textOutputLocation.text =
-                        getString(R.string.output_saved, displayNameOf(resultUri))
-                    outputUri = resultUri
+                        getString(R.string.output_saved, displayNameOf(outputUri))
+                    this@MainActivity.lastResultUri = outputUri
+                    // Ask for a new destination before the next run so the
+                    // finished file can never be overwritten silently.
+                    this@MainActivity.outputUri = null
                     binding.buttonOpenOutput.visibility = View.VISIBLE
                     Toast.makeText(this@MainActivity, R.string.toast_completed, Toast.LENGTH_LONG).show()
                 }
@@ -268,7 +275,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openOutput() {
-        val uri = outputUri ?: return
+        val uri = lastResultUri ?: return
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, VideoPicker.MP4_MIME_TYPE)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
