@@ -61,7 +61,7 @@ class MainActivity : AppCompatActivity() {
 
         metadataReader = VideoMetadataReader(this)
         val storage = StorageManager(this)
-        processingManager = ProcessingManager(storage, VideoProcessor(this))
+        processingManager = ProcessingManager(storage, VideoProcessor())
 
         binding.buttonSelectVideo.setOnClickListener {
             if (!processingManager.isProcessing()) {
