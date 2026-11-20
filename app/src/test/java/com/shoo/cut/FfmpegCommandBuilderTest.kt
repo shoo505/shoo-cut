@@ -8,12 +8,12 @@ import org.junit.Test
 
 class FfmpegCommandBuilderTest {
 
-    private fun plan(segmentCount: Int = 3): SegmentPlan {
+    private fun plan(segmentCount: Int = 4): SegmentPlan {
         val segments = (0 until segmentCount).map { index ->
-            Segment(index, index * 100.0 + 10.0, index * 100.0 + 50.0)
+            Segment(index, index * 100.0, (index + 1) * 100.0)
         }
         val actual = segments.sumOf { it.durationSeconds }
-        return SegmentPlan(1000.0, 50.0, actual, actual, segments)
+        return SegmentPlan(400.0, 100.0, actual, actual, segments)
     }
 
     private fun args(
@@ -22,7 +22,7 @@ class FfmpegCommandBuilderTest {
         width: Int = 1920,
         height: Int = 1080,
         inputPath: String = "/tmp/in.mp4"
-    ): List<String> = FfmpegCommandBuilder.buildArguments(
+    ): Pair<FfmpegCommandBuilder.Mode, List<String>> = FfmpegCommandBuilder.buildArguments(
         inputPath = inputPath,
         outputPath = "/tmp/out.mp4",
         plan = plan(),
@@ -32,56 +32,119 @@ class FfmpegCommandBuilderTest {
         hasAudio = hasAudio
     )
 
+    private fun filterOf(args: Pair<FfmpegCommandBuilder.Mode, List<String>>): String =
+        args.second[args.second.indexOf("-filter_complex") + 1]
+
     private fun filterOf(args: List<String>): String =
         args[args.indexOf("-filter_complex") + 1]
 
     @Test
-    fun buildsOneInputPerSegmentWithSeekAndDuration() {
-        val args = args(hasAudio = false)
-        assertEquals(3, args.count { it == "-ss" })
-        assertEquals(3, args.count { it == "-t" })
-        assertEquals(3, args.count { it == "-i" })
-        assertEquals(3, args.count { it == "-noautorotate" })
-        assertEquals("10.000", args[args.indexOf("-ss") + 1])
+    fun streamCopyWhenAlready720pNoRotation() {
+        val (mode, args) = args(hasAudio = false, width = 1280, height = 720)
+        assertEquals(FfmpegCommandBuilder.Mode.STREAM_COPY, mode)
+        assertTrue(args.contains("-c:v"))
+        assertTrue(args.indexOf("-c:v") >= 0)
+        assertEquals("copy", args[args.indexOf("-c:v") + 1])
+        assertFalse(args.contains("libopenh264"))
+        assertFalse(args.contains("scale="))
+        assertFalse(args.contains("pad="))
     }
 
     @Test
-    fun usesSinglePassFilterComplex() {
-        val filter = filterOf(args(hasAudio = true))
-        assertTrue(filter.contains("concat=n=3:v=1:a=0"))
-        assertTrue(filter.contains("concat=n=3:v=0:a=1"))
+    fun streamCopyWithAudio() {
+        val (mode, args) = args(hasAudio = true, width = 1280, height = 720)
+        assertEquals(FfmpegCommandBuilder.Mode.STREAM_COPY, mode)
+        assertEquals("copy", args[args.indexOf("-c:v") + 1])
+        assertEquals("copy", args[args.indexOf("-c:a") + 1])
+        assertEquals(2, args.count { it == "-map" })
+    }
+
+    @Test
+    fun reencodeWhenNot720p() {
+        val modeAndArgs = args(hasAudio = false, width = 1920, height = 1080)
+        assertEquals(FfmpegCommandBuilder.Mode.BICUBIC_REENCODE, modeAndArgs.first)
+        assertEquals("libopenh264", modeAndArgs.second[modeAndArgs.second.indexOf("-c:v") + 1])
+        val filter = filterOf(modeAndArgs)
+        assertTrue(filter.contains("scale="))
+        assertTrue(filter.contains("pad="))
+    }
+
+    @Test
+    fun reencodeWhenRotationPresent() {
+        val modeAndArgs = args(hasAudio = false, width = 1280, height = 720, rotationDegrees = 90)
+        assertEquals(FfmpegCommandBuilder.Mode.BICUBIC_REENCODE, modeAndArgs.first)
+        assertEquals("libopenh264", modeAndArgs.second[modeAndArgs.second.indexOf("-c:v") + 1])
+        val filter = filterOf(modeAndArgs)
+        assertTrue(filter.contains("transpose="))
+    }
+
+    @Test
+    fun canUseStreamCopyReturnsTrueFor720p() {
+        assertTrue(FfmpegCommandBuilder.canUseStreamCopy(1280, 720, 0))
+    }
+
+    @Test
+    fun canUseStreamCopyReturnsFalseForNon720p() {
+        assertFalse(FfmpegCommandBuilder.canUseStreamCopy(1920, 1080, 0))
+        assertFalse(FfmpegCommandBuilder.canUseStreamCopy(640, 360, 0))
+        assertFalse(FfmpegCommandBuilder.canUseStreamCopy(1280, 720, 90))
+        assertFalse(FfmpegCommandBuilder.canUseStreamCopy(1280, 720, 180))
+        assertFalse(FfmpegCommandBuilder.canUseStreamCopy(1280, 720, 270))
+    }
+
+    @Test
+    fun streamCopyBuildsOneInputPerSegment() {
+        val (_, args) = args(hasAudio = false, width = 1280, height = 720)
+        assertEquals(4, args.count { it == "-ss" })
+        assertEquals(4, args.count { it == "-t" })
+        assertEquals(4, args.count { it == "-i" })
+    }
+
+    @Test
+    fun streamCopyUsesConcatFilter() {
+        val modeAndArgs = args(hasAudio = true, width = 1280, height = 720)
+        val filter = filterOf(modeAndArgs)
+        assertTrue(filter.contains("concat=n=4:v=1:a=0"))
+        assertTrue(filter.contains("concat=n=4:v=0:a=1"))
+        assertTrue(filter.contains("setpts=PTS-STARTPTS"))
+        assertTrue(filter.contains("asetpts=PTS-STARTPTS"))
+    }
+
+    @Test
+    fun reencodeUsesBicubicScale() {
+        val modeAndArgs = args(hasAudio = true, width = 1920, height = 1080)
+        val filter = filterOf(modeAndArgs)
         assertTrue(filter.contains("scale=1280:720:flags=bicubic"))
         assertTrue(filter.contains("pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black"))
         assertTrue(filter.contains("setsar=1"))
     }
 
     @Test
-    fun encodesH264AndAacWhenAudioPresent() {
-        val args = args(hasAudio = true)
-        assertEquals("libopenh264", args[args.indexOf("-c:v") + 1])
-        assertEquals("4M", args[args.indexOf("-b:v") + 1])
-        assertEquals("yuv420p", args[args.indexOf("-pix_fmt") + 1])
-        assertEquals("aac", args[args.indexOf("-c:a") + 1])
-        assertEquals("2", args[args.indexOf("-ac") + 1])
-        assertEquals(2, args.count { it == "-map" })
-        assertTrue(args.contains("[aout]"))
+    fun reencodeEncodesH264AndAac() {
+        val modeAndArgs = args(hasAudio = true)
+        assertEquals("libopenh264", modeAndArgs.second[modeAndArgs.second.indexOf("-c:v") + 1])
+        assertEquals("4M", modeAndArgs.second[modeAndArgs.second.indexOf("-b:v") + 1])
+        assertEquals("yuv420p", modeAndArgs.second[modeAndArgs.second.indexOf("-pix_fmt") + 1])
+        assertEquals("aac", modeAndArgs.second[modeAndArgs.second.indexOf("-c:a") + 1])
+        assertEquals("2", modeAndArgs.second[modeAndArgs.second.indexOf("-ac") + 1])
+        assertEquals(2, modeAndArgs.second.count { it == "-map" })
     }
 
     @Test
     fun omitsAudioWhenSourceHasNoAudio() {
-        val args = args(hasAudio = false)
-        assertFalse(args.contains("-c:a"))
-        assertEquals(1, args.count { it == "-map" })
-        assertFalse(args.contains("[aout]"))
-        assertTrue(args.contains("[vout]"))
+        val modeAndArgs = args(hasAudio = false, width = 1920, height = 1080)
+        assertFalse(modeAndArgs.second.contains("-c:a"))
+        assertEquals(1, modeAndArgs.second.count { it == "-map" })
+        assertFalse(modeAndArgs.second.contains("[aout]"))
+        assertTrue(modeAndArgs.second.contains("[vout]"))
     }
 
     @Test
     fun writesFastStartMp4ToOutputPath() {
-        val args = args(hasAudio = true)
-        assertEquals("mp4", args[args.indexOf("-f") + 1])
-        assertEquals("/tmp/out.mp4", args.last())
-        assertTrue(args.contains("+faststart"))
+        val modeAndArgs = args(hasAudio = true)
+        assertEquals("mp4", modeAndArgs.second[modeAndArgs.second.indexOf("-f") + 1])
+        assertEquals("/tmp/out.mp4", modeAndArgs.second.last())
+        assertTrue(modeAndArgs.second.contains("+faststart"))
     }
 
     @Test

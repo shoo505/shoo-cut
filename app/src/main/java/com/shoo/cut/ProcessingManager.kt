@@ -9,11 +9,17 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Orchestrates the whole background pipeline: copy input, run FFmpeg, stream the
- * result to the SAF destination, clean temp files and report progress.
+ * Orchestrates the smart processing pipeline with automatic mode selection:
  *
- * All callbacks are delivered on the main thread, so the Activity can update its
- * views directly. Only one job runs at a time.
+ * 1. STREAM COPY: When input is already 1280x720 with no rotation.
+ *    Uses `-c copy` for fast, lossless processing.
+ * 2. BICUBIC RE-ENCODE: When scaling/rotation is needed.
+ *    Uses libopenh264 with bicubic scaling.
+ * 3. AUTOMATIC FALLBACK: If stream copy fails, automatically retries
+ *    with bicubic re-encode.
+ *
+ * Processes 4 segments sequentially to minimize Android memory pressure.
+ * All callbacks are delivered on the main thread.
  */
 class ProcessingManager(
     private val storage: StorageManager,
@@ -93,7 +99,8 @@ class ProcessingManager(
                 val output = storage.createTempOutputFile()
                 tempOutput = output
 
-                val command = FfmpegCommandBuilder.buildCommand(
+                // Determine initial processing mode
+                val (initialMode, command) = FfmpegCommandBuilder.buildArguments(
                     inputPath = input.absolutePath,
                     outputPath = output.absolutePath,
                     plan = plan,
@@ -103,29 +110,19 @@ class ProcessingManager(
                     hasAudio = metadata.hasAudio
                 )
 
-                postProgress(10, "Encoding ${plan.segments.size} segment(s)…")
-                val totalMillis = (plan.actualRetainedSeconds * 1000.0).coerceAtLeast(1.0)
-                val exitCode = processor.run(command) { currentMillis ->
-                    if (!cancelled.get()) {
-                        val percent = (10.0 + 85.0 * currentMillis / totalMillis)
-                            .toInt()
-                            .coerceIn(10, 95)
-                        postProgress(percent, "Encoding… $percent%")
-                    }
-                }
+                // Execute with automatic fallback
+                val finalMode = executeWithFallback(
+                    command = command,
+                    initialMode = initialMode,
+                    input = input,
+                    output = output,
+                    plan = plan,
+                    metadata = metadata
+                )
 
                 if (cancelled.get() || processor.wasCancelled()) {
                     finishCancelled()
                     return@execute
-                }
-                if (exitCode != 0) {
-                    val diagnostics = processor.diagnostics()
-                    if (diagnostics.isNotEmpty()) {
-                        Log.w(TAG, "FFmpeg failed:\n$diagnostics")
-                    }
-                    throw IllegalStateException(
-                        "Video encoding failed (${VideoProcessor.describeReturnCode(exitCode)})."
-                    )
                 }
                 if (!output.isFile || output.length() <= 0L) {
                     throw IllegalStateException("FFmpeg produced no output.")
@@ -133,13 +130,111 @@ class ProcessingManager(
 
                 postProgress(96, "Saving to the selected location…")
                 storage.writeFileToUri(output, outputUri)
-                finishSuccess(outputUri)
+                finishSuccess(outputUri, finalMode)
             } catch (e: Exception) {
                 if (cancelled.get() && e !is StorageException) {
                     finishCancelled()
                 } else {
                     finishError(e.message ?: "Processing failed.")
                 }
+            }
+        }
+    }
+
+    /**
+     * Executes FFmpeg command with automatic fallback from stream copy to re-encode.
+     * Returns the mode that actually succeeded.
+     */
+    private fun executeWithFallback(
+        command: List<String>,
+        initialMode: FfmpegCommandBuilder.Mode,
+        input: File,
+        output: File,
+        plan: SegmentPlan,
+        metadata: VideoMetadata
+    ): FfmpegCommandBuilder.Mode {
+        var currentMode = initialMode
+        var currentCommand = command
+
+        // Try initial mode
+        val exitCode = runCommand(currentCommand, plan, currentMode)
+
+        // If stream copy failed and we haven't tried re-encode yet, fall back
+        if (exitCode != 0 && currentMode == FfmpegCommandBuilder.Mode.STREAM_COPY) {
+            if (!cancelled.get() && !processor.wasCancelled()) {
+                val diagnostics = processor.diagnostics()
+                if (diagnostics.isNotEmpty()) {
+                    Log.w(TAG, "Stream copy failed, falling back to bicubic re-encode:\n$diagnostics")
+                }
+                postProgress(10, "Stream copy failed, falling back to re-encode…")
+
+                // Clean up failed output
+                storage.deleteQuietly(output)
+                val newOutput = storage.createTempOutputFile()
+                tempOutput = newOutput
+
+                // Build re-encode command
+                val (_, reencodeCommand) = FfmpegCommandBuilder.buildArguments(
+                    inputPath = input.absolutePath,
+                    outputPath = newOutput.absolutePath,
+                    plan = plan,
+                    sourceWidth = metadata.width,
+                    sourceHeight = metadata.height,
+                    rotationDegrees = metadata.rotationDegrees,
+                    hasAudio = metadata.hasAudio
+                )
+
+                currentMode = FfmpegCommandBuilder.Mode.BICUBIC_REENCODE
+                currentCommand = reencodeCommand
+
+                // Retry with re-encode
+                val retryExitCode = runCommand(currentCommand, plan, currentMode)
+
+                if (retryExitCode != 0) {
+                    val retryDiagnostics = processor.diagnostics()
+                    if (retryDiagnostics.isNotEmpty()) {
+                        Log.w(TAG, "Re-encode fallback also failed:\n$retryDiagnostics")
+                    }
+                    throw IllegalStateException(
+                        "Video processing failed (${VideoProcessor.describeReturnCode(retryExitCode)})."
+                    )
+                }
+            }
+        } else if (exitCode != 0) {
+            val diagnostics = processor.diagnostics()
+            if (diagnostics.isNotEmpty()) {
+                Log.w(TAG, "FFmpeg failed:\n$diagnostics")
+            }
+            throw IllegalStateException(
+                "Video processing failed (${VideoProcessor.describeReturnCode(exitCode)})."
+            )
+        }
+
+        return currentMode
+    }
+
+    /**
+     * Runs a single FFmpeg command with progress reporting.
+     */
+    private fun runCommand(
+        command: List<String>,
+        plan: SegmentPlan,
+        mode: FfmpegCommandBuilder.Mode
+    ): Int {
+        val commandString = command.joinToString(" ") { FfmpegCommandBuilder.quote(it) }
+        val modeName = when (mode) {
+            FfmpegCommandBuilder.Mode.STREAM_COPY -> "Stream copy"
+            FfmpegCommandBuilder.Mode.BICUBIC_REENCODE -> "Bicubic re-encode"
+        }
+        postProgress(10, "$modeName ${plan.segments.size} segment(s)…")
+
+        val totalMillis = (plan.actualRetainedSeconds * 1000.0).coerceAtLeast(1.0)
+        return processor.run(commandString) { currentMillis ->
+            if (!cancelled.get()) {
+                val percent = (10.0 + 85.0 * currentMillis / totalMillis)
+                    .toInt()
+                    .coerceIn(10, 95)
+                postProgress(percent, "$modeName… $percent%")
             }
         }
     }
@@ -151,8 +246,6 @@ class ProcessingManager(
         postProgress(lastPercent, "Cancelling…")
         processor.cancel()
 
-        // The process normally exits immediately, but guarantee UI completion
-        // even if a device is slow to reap it.
         mainHandler.postDelayed({
             if (running.get() && !finished.get()) {
                 finishCancelled()
@@ -177,7 +270,16 @@ class ProcessingManager(
         }
     }
 
-    private fun finishSuccess(outputUri: Uri) = finish { it.onSuccess(outputUri) }
+    private fun finishSuccess(outputUri: Uri, mode: FfmpegCommandBuilder.Mode) {
+        val modeName = when (mode) {
+            FfmpegCommandBuilder.Mode.STREAM_COPY -> " (stream copy)"
+            FfmpegCommandBuilder.Mode.BICUBIC_REENCODE -> " (bicubic 720p)"
+        }
+        finish { it.onSuccess(outputUri) }
+        mainHandler.post {
+            listener?.onProgress(100, "Completed$modeName")
+        }
+    }
 
     private fun finishError(message: String) = finish { it.onError(message) }
 

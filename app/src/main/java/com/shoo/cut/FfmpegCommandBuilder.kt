@@ -5,9 +5,12 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Builds a single-pass FFmpeg command that trims every retained segment,
- * concatenates them, upscales with bicubic interpolation into a 1280x720
- * letterboxed canvas and encodes H.264/AAC MP4.
+ * Builds FFmpeg commands for two processing modes:
+ *
+ * 1. STREAM COPY MODE: Uses `-c copy` when input is already 1280x720 with no
+ *    rotation. Fast, lossless, no re-encoding.
+ * 2. BICUBIC 720P MODE: Re-encodes with bicubic scaling when input resolution
+ *    differs from 720p target or rotation is present.
  *
  * The command is pure data (no Android types), so it can be unit tested on the
  * JVM. It targets the FFmpeg 4.4 binary shipped by the verified
@@ -26,6 +29,29 @@ object FfmpegCommandBuilder {
 
     /** Target video bitrate for the 720p H.264 stream. */
     const val VIDEO_BITRATE = "4M"
+
+    /** Processing mode selected based on input characteristics. */
+    enum class Mode {
+        STREAM_COPY,
+        BICUBIC_REENCODE
+    }
+
+    /**
+     * Determines if stream copy mode can be used.
+     *
+     * Stream copy is possible when:
+     * - Input display dimensions are exactly 1280x720 (after rotation)
+     * - No rotation is needed (rotationDegrees == 0)
+     * - This ensures the output matches the target without any transformation.
+     */
+    fun canUseStreamCopy(
+        sourceWidth: Int,
+        sourceHeight: Int,
+        rotationDegrees: Int
+    ): Boolean {
+        if (rotationDegrees != 0) return false
+        return sourceWidth == OUTPUT_WIDTH && sourceHeight == OUTPUT_HEIGHT
+    }
 
     /**
      * Returns `[width, height]` of the scaled picture before padding, keeping the
@@ -53,11 +79,8 @@ object FfmpegCommandBuilder {
     }
 
     /**
-     * Builds the command line for `FFmpeg.execute`.
-     *
-     * Paths come from the app's private cache, but they are quoted when they
-     * contain whitespace so a relocated cache directory can never break the
-     * command.
+     * Builds the appropriate command based on whether stream copy is possible.
+     * This is the main entry point for the processing pipeline.
      */
     fun buildCommand(
         inputPath: String,
@@ -75,9 +98,13 @@ object FfmpegCommandBuilder {
         sourceHeight,
         rotationDegrees,
         hasAudio
-    ).joinToString(" ") { quote(it) }
+    ).second.joinToString(" ") { quote(it) }
 
-    /** Same as [buildCommand] but as an argument list, which is easier to test. */
+    /**
+     * Builds the argument list for the optimal processing mode.
+     * Returns STREAM_COPY command if input is already 720p with no rotation,
+     * otherwise returns BICUBIC_REENCODE command.
+     */
     fun buildArguments(
         inputPath: String,
         outputPath: String,
@@ -86,9 +113,125 @@ object FfmpegCommandBuilder {
         sourceHeight: Int,
         rotationDegrees: Int,
         hasAudio: Boolean
-    ): List<String> {
+    ): Pair<Mode, List<String>> {
         require(plan.segments.isNotEmpty()) { "The segment plan is empty." }
 
+        val useStreamCopy = canUseStreamCopy(sourceWidth, sourceHeight, rotationDegrees)
+
+        return if (useStreamCopy) {
+            Mode.STREAM_COPY to buildStreamCopyArguments(
+                inputPath,
+                outputPath,
+                plan,
+                hasAudio
+            )
+        } else {
+            Mode.BICUBIC_REENCODE to buildReencodeArguments(
+                inputPath,
+                outputPath,
+                plan,
+                sourceWidth,
+                sourceHeight,
+                rotationDegrees,
+                hasAudio
+            )
+        }
+    }
+
+    /**
+     * Builds stream copy command arguments.
+     * Uses `-c copy` for both video and audio, with segment trimming and concatenation.
+     */
+    private fun buildStreamCopyArguments(
+        inputPath: String,
+        outputPath: String,
+        plan: SegmentPlan,
+        hasAudio: Boolean
+    ): List<String> {
+        val args = ArrayList<String>()
+        args += "-y"
+        args += "-hide_banner"
+        args += "-nostdin"
+        args += "-loglevel"
+        args += "info"
+        args += "-stats"
+
+        // One input per segment with precise seeking
+        for (segment in plan.segments) {
+            val start = String.format(Locale.US, "%.3f", segment.startSeconds.coerceAtLeast(0.0))
+            val duration = String.format(
+                Locale.US,
+                "%.3f",
+                segment.durationSeconds.coerceAtLeast(0.001)
+            )
+            args += "-ss"
+            args += start
+            args += "-t"
+            args += duration
+            args += "-i"
+            args += inputPath
+        }
+
+        // Concat filter for stream copy - no re-encoding
+        val filters = ArrayList<String>()
+
+        for (index in plan.segments.indices) {
+            filters += "[$index:v]setpts=PTS-STARTPTS[v$index]"
+            if (hasAudio) {
+                filters += "[$index:a]asetpts=PTS-STARTPTS[a$index]"
+            }
+        }
+
+        val videoLabels = plan.segments.indices.joinToString(separator = "") { "[v$it]" }
+        filters += "${videoLabels}concat=n=${plan.segments.size}:v=1:a=0[vout]"
+
+        if (hasAudio) {
+            val audioLabels = plan.segments.indices.joinToString(separator = "") { "[a$it]" }
+            filters += "${audioLabels}concat=n=${plan.segments.size}:v=0:a=1[aout]"
+        }
+
+        args += "-filter_complex"
+        args += filters.joinToString(";")
+
+        args += "-map"
+        args += "[vout]"
+        if (hasAudio) {
+            args += "-map"
+            args += "[aout]"
+        }
+
+        // Stream copy - no re-encoding
+        args += "-c:v"
+        args += "copy"
+        if (hasAudio) {
+            args += "-c:a"
+            args += "copy"
+        }
+
+        args += "-movflags"
+        args += "+faststart"
+        args += "-avoid_negative_ts"
+        args += "make_zero"
+        args += "-f"
+        args += "mp4"
+        args += outputPath
+
+        return args
+    }
+
+    /**
+     * Builds re-encode command arguments with bicubic scaling.
+     * This is the original implementation for non-720p inputs.
+     */
+    private fun buildReencodeArguments(
+        inputPath: String,
+        outputPath: String,
+        plan: SegmentPlan,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        rotationDegrees: Int,
+        hasAudio: Boolean
+    ): List<String> {
         val args = ArrayList<String>()
         args += "-y"
         args += "-hide_banner"
