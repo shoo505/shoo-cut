@@ -35,6 +35,7 @@ class ProcessingService : Service() {
         const val EXTRA_INPUT_URI = "input_uri"
         const val EXTRA_OUTPUT_URI = "output_uri"
         const val EXTRA_JOB_ID = "job_id"
+        const val EXTRA_JOB_STATE = "job_state"
 
         const val BROADCAST_PROGRESS = "com.shoo.cut.broadcast.PROGRESS"
         const val BROADCAST_COMPLETED = "com.shoo.cut.broadcast.COMPLETED"
@@ -198,7 +199,7 @@ class ProcessingService : Service() {
     private fun calculateEta(percent: Int, now: Long): Long? {
         if (percent <= 0 || jobStartTime == 0) return null
         val elapsed = now - jobStartTime
-        if (elapsed < 2000) return null // Need some progress data first
+        if (elapsed < 2000L) return null // Need some progress data first
         val estimatedTotal = (elapsed * 100.0 / percent).toLong()
         val remaining = estimatedTotal - elapsed
         return if (remaining > 0L) remaining else 0L
